@@ -1,0 +1,5 @@
+{
+  "name": "Let It Snow",
+  "columns": ["todo", "ready", "in_progress", "done"],
+  "tasks": []
+}

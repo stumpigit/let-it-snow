@@ -1,0 +1,13 @@
+.git
+.gitignore
+.gitattributes
+README.md
+MAINTAINERS.md
+docs
+LICENSE
+.env
+__pycache__
+node_modules
+*.log
+venv
+.venv

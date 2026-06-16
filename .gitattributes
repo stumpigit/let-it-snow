@@ -1,0 +1,24 @@
+# Git attributes for better file handling
+*.py text eol=lf
+*.ts text eol=lf
+*.svelte text eol=lf
+*.md text eol=lf
+*.html text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.sh text eol=lf
+*.txt text eol=lf
+
+# Binary files
+*.tif binary
+*.gpkg binary
+*.zip binary
+*.pdf binary
+
+# Exclude large data files
+data/raw/orthophoto/*.tif -text
+data/raw/dem/*.tif -text
+data/intermediate/* -text
+data/output/* -text
+data/viewer/* -text
