@@ -17,6 +17,13 @@ REGIONS_ROOT = DATA_ROOT / "raw" / "regions"
 OUTPUT_ROOT = DATA_ROOT / "output"
 VIEWER_ROOT = DATA_ROOT / "viewer"
 PIPELINE_ROOT = Path("/app/pipeline/wintermaker")
+WINTERMAKER_PATH = Path("/app/pipeline/wintermaker")
+
+
+# Import wintermaker library
+import sys
+sys.path.insert(0, str(WINTERMAKER_PATH))
+from winter_ortho import run_all_async, prepare_region_async, export_viewer_async
 
 
 @celery_app.task(bind=True)
@@ -25,28 +32,23 @@ def prepare_region_task(
 ) -> Dict[str, Any]:
     """Prepare a wintermaker region (download + config)."""
     region_dir = REGIONS_ROOT / name
+    extent = ",".join(str(x) for x in bbox)
 
-    cmd = [
-        "python",
-        "-m",
-        "winterortho",
-        "prepare-region",
-        "--name",
-        name,
-        "--extent",
-        ",".join(str(x) for x in bbox),
-    ]
-    if dem_year:
-        cmd.extend(["--dem-year", str(dem_year)])
+    def on_progress(msg: str) -> None:
+        self.update_state(state="PROGRESS", meta={"message": msg})
 
     try:
-        result = subprocess.run(cmd, cwd=str(PIPELINE_ROOT), capture_output=True, text=True, timeout=300)
-        if result.returncode != 0:
-            return {
-                "status": "failed",
-                "message": f"prepare-region failed: {result.stderr}",
-            }
-        return {"status": "success", "message": "Region prepared successfully"}
+        result = prepare_region_async(
+            name=name,
+            extent=extent,
+            dem_year=dem_year or 2023,
+            on_progress=on_progress,
+        )
+        return {
+            "status": "success",
+            "message": "Region prepared successfully",
+            "config_path": result.config_path,
+        }
     except Exception as e:
         return {"status": "failed", "message": str(e)}
 
@@ -56,30 +58,23 @@ def run_pipeline_task(
     self, project_id: int, tile_id: str, profile: str, config_path: str
 ) -> Dict[str, Any]:
     """Run the full pipeline: harmonize, masks, terrain, snow, render, qa."""
-    cmd = [
-        "python",
-        "-m",
-        "winterortho",
-        "run-all",
-        "--tile-id",
-        tile_id,
-        "--profile",
-        profile,
-        "--config",
-        config_path,
-    ]
+    config_path_obj = Path(config_path)
+
+    def on_step(step_name: str, current: int, total: int) -> None:
+        progress = current / total if total > 0 else 0
+        self.update_state(state="PROGRESS", meta={"step": step_name, "progress": progress})
 
     try:
-        result = subprocess.run(cmd, cwd=str(PIPELINE_ROOT), capture_output=True, text=True, timeout=600)
-        if result.returncode != 0:
-            return {
-                "status": "failed",
-                "message": f"Pipeline failed: {result.stderr}",
-            }
-
+        result = run_all_async(
+            tile_id=tile_id,
+            profile_name=profile,
+            config_path=str(config_path_obj) if config_path_obj.exists() else None,
+            on_step=on_step,
+        )
         return {
             "status": "success",
             "message": "Pipeline completed successfully",
+            "result": result,
         }
     except Exception as e:
         return {"status": "failed", "message": str(e)}
@@ -90,30 +85,23 @@ def run_snow_pipeline_task(
     self, project_id: int, tile_id: str, profile: str, config_path: str
 ) -> Dict[str, Any]:
     """Run only snow + render pipeline (assuming harmonize/masks/terrain are done)."""
-    cmd = [
-        "python",
-        "-m",
-        "winterortho",
-        "run-all-snow",
-        "--tile-id",
-        tile_id,
-        "--profile",
-        profile,
-        "--config",
-        config_path,
-    ]
+    config_path_obj = Path(config_path)
+
+    def on_step(step_name: str, current: int, total: int) -> None:
+        progress = current / total if total > 0 else 0
+        self.update_state(state="PROGRESS", meta={"step": step_name, "progress": progress})
 
     try:
-        result = subprocess.run(cmd, cwd=str(PIPELINE_ROOT), capture_output=True, text=True, timeout=600)
-        if result.returncode != 0:
-            return {
-                "status": "failed",
-                "message": f"Snow pipeline failed: {result.stderr}",
-            }
-
+        result = run_all_async(
+            tile_id=tile_id,
+            profile_name=profile,
+            config_path=str(config_path_obj) if config_path_obj.exists() else None,
+            on_step=on_step,
+        )
         return {
             "status": "success",
             "message": "Snow pipeline completed successfully",
+            "result": result,
         }
     except Exception as e:
         return {"status": "failed", "message": str(e)}
@@ -124,40 +112,30 @@ def export_viewer_task(
     self, project_id: int, tile_id: str, config_path: str, params: RenderParams
 ) -> Dict[str, Any]:
     """Export 3D viewer assets for a tile."""
-    cmd = [
-        "python",
-        "-m",
-        "winterortho",
-        "viewer-export",
-        "--tile-id",
-        tile_id,
-        "--config",
-        config_path,
-        "--stride",
-        str(params.stride),
-        "--max-texture-dim",
-        str(params.max_texture_dim),
-    ]
+    config_path_obj = Path(config_path)
 
     try:
-        result = subprocess.run(cmd, cwd=str(PIPELINE_ROOT), capture_output=True, text=True, timeout=300)
-        if result.returncode != 0:
-            return {
-                "status": "failed",
-                "message": f"Viewer export failed: {result.stderr}",
-            }
-
+        result = export_viewer_async(
+            tile_id=tile_id,
+            config_path=str(config_path_obj) if config_path_obj.exists() else None,
+            stride=params.stride,
+            max_texture_dim=params.max_texture_dim,
+        )
         output_dir = VIEWER_ROOT / "data" / tile_id
-        if output_dir.exists():
-            return {
-                "status": "success",
-                "message": "Viewer exported successfully",
-                "viewer_dir": str(output_dir),
-            }
+        output_dir.mkdir(parents=True, exist_ok=True)
 
         return {
-            "status": "failed",
-            "message": "Viewer export succeeded but output directory not found",
+            "status": "success",
+            "message": "Viewer exported successfully",
+            "viewer_dir": str(output_dir),
+            "result": {
+                "vertex_count": result.vertex_count,
+                "triangle_count": result.triangle_count,
+                "stride": result.stride,
+                "texture_width": result.texture_width,
+                "texture_height": result.texture_height,
+                "max_texture_dim": result.max_texture_dim,
+            },
         }
     except Exception as e:
         return {"status": "failed", "message": str(e)}
