@@ -1,12 +1,22 @@
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, JSON, Text, select
-from sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy.orm import Session, sessionmaker, declarative_base
 from datetime import datetime
 from typing import Optional, List
 import os
 import subprocess
 
-from app.schemas import ProjectCreate, ProjectUpdate, ProjectResponse, GPXTrackCreate, GPXTrackResponse, RenderParams
+from app.schemas import (
+    ProjectCreate,
+    ProjectUpdate,
+    ProjectResponse,
+    GPXTrackCreate,
+    GPXTrackResponse,
+    RenderParams,
+    PrepareRegionRequest,
+    PipelineRequest,
+    ExportViewerRequest,
+)
 
 # DB setup
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./app.db")
@@ -110,31 +120,51 @@ def list_gpx(db: Session = Depends(get_db)):
     return tracks
 
 @router.post("/tasks/prepare")
-def prepare_region(project_id: int, name: str, bbox: List[float], dem_year: Optional[int] = None):
+def prepare_region(request: PrepareRegionRequest):
     """Start region preparation task (returns immediately with task_id)."""
     from app.tasks import prepare_region_task
-    result = prepare_region_task.delay(project_id, name, bbox, dem_year)
+    result = prepare_region_task.delay(
+        request.project_id,
+        request.name,
+        request.bbox,
+        request.dem_year,
+    )
     return {"task_id": result.id}
 
 @router.post("/tasks/run-pipeline")
-def run_pipeline(project_id: int, tile_id: str, profile: str, config_path: str):
+def run_pipeline(request: PipelineRequest):
     """Start full pipeline task (returns immediately with task_id)."""
     from app.tasks import run_pipeline_task
-    result = run_pipeline_task.delay(project_id, tile_id, profile, config_path)
+    result = run_pipeline_task.delay(
+        request.project_id,
+        request.tile_id,
+        request.profile,
+        request.config_path,
+    )
     return {"task_id": result.id}
 
 @router.post("/tasks/run-snow")
-def run_snow_pipeline(project_id: int, tile_id: str, profile: str, config_path: str):
+def run_snow_pipeline(request: PipelineRequest):
     """Start snow-only pipeline task."""
     from app.tasks import run_snow_pipeline_task
-    result = run_snow_pipeline_task.delay(project_id, tile_id, profile, config_path)
+    result = run_snow_pipeline_task.delay(
+        request.project_id,
+        request.tile_id,
+        request.profile,
+        request.config_path,
+    )
     return {"task_id": result.id}
 
 @router.post("/tasks/export-viewer")
-def export_viewer(project_id: int, tile_id: str, config_path: str, params: RenderParams):
+def export_viewer(request: ExportViewerRequest):
     """Start viewer export task."""
     from app.tasks import export_viewer_task
-    result = export_viewer_task.delay(project_id, tile_id, config_path, params)
+    result = export_viewer_task.delay(
+        request.project_id,
+        request.tile_id,
+        request.config_path,
+        request.params.model_dump(),
+    )
     return {"task_id": result.id}
 
 @router.get("/tasks/{task_id}")
@@ -142,9 +172,26 @@ def get_task_status(task_id: str):
     """Get Celery task status."""
     from app.tasks import celery_app
     result = celery_app.AsyncResult(task_id)
+    status = result.status
+    progress = None
+    message = None
+
+    if status == "SUCCESS" and isinstance(result.result, dict):
+        if result.result.get("status") == "failed":
+            status = "FAILURE"
+            message = result.result.get("message")
+        else:
+            progress = result.result
+    elif status == "SUCCESS":
+        progress = result.result
+    elif status == "FAILURE":
+        message = str(result.info) if result.info else None
+    elif status == "PROGRESS" and isinstance(result.info, dict):
+        progress = result.info
+
     return {
         "task_id": task_id,
-        "status": result.status,
-        "progress": result.result if result.status == "SUCCESS" else None,
-        "message": result.info if result.status == "FAILURE" else None,
+        "status": status,
+        "progress": progress,
+        "message": message,
     }

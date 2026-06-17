@@ -1,14 +1,17 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { createEventDispatcher, onMount } from 'svelte';
 
   export let taskId: string = '';
   export let apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+
+  const dispatch = createEventDispatcher();
 
   let status: string = '';
   let progress: number = 0;
   let message: string = '';
   let error: string | null = null;
   let intervalId: number | null = null;
+  let completed = false;
 
   onMount(() => {
     async function fetchStatus() {
@@ -18,9 +21,24 @@
         const data = await res.json();
 
         status = data.status;
-        progress = typeof data.progress === 'number' ? data.progress : 0;
-        message = data.message || '';
-        error = data.progress ? null : data.message || null;
+        if (typeof data.progress === 'number') {
+          progress = data.progress;
+        } else if (data.progress && typeof data.progress === 'object') {
+          message = data.progress.message || data.progress.step || message;
+          if (typeof data.progress.progress === 'number') {
+            progress = data.progress.progress;
+          }
+        }
+        if (data.message) {
+          error = data.status === 'FAILURE' ? data.message : null;
+          message = data.message;
+        }
+
+        if (!completed && (status === 'SUCCESS' || status === 'FAILURE')) {
+          completed = true;
+          dispatch('complete', data);
+          if (intervalId) clearInterval(intervalId);
+        }
       } catch (e: any) {
         error = e.message;
       }

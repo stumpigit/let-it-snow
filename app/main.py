@@ -1,7 +1,9 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
-from app import router
+from app.paths import VIEWER_DATA_ROOT
+from app.router import router
 
 app = FastAPI(
     title="Let It Snow API",
@@ -18,3 +20,10 @@ app.add_middleware(
 )
 
 app.include_router(router)
+
+if VIEWER_DATA_ROOT.is_dir():
+    app.mount(
+        "/viewer/data",
+        StaticFiles(directory=str(VIEWER_DATA_ROOT)),
+        name="viewer-data",
+    )

@@ -1,6 +1,8 @@
 import os
+import re
 import subprocess
 import shutil
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -11,19 +13,91 @@ from app.schemas import RenderParams
 from sqlalchemy.orm import Session
 
 
-DATA_ROOT = Path("/app/data")
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+REGION_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
+
+
+def _resolve_wintermaker_path() -> Path:
+    if env_path := os.getenv("WINTERMAKER_PATH"):
+        return Path(env_path)
+    pointer = PROJECT_ROOT / "pipeline" / "wintermaker"
+    if pointer.is_file() and not pointer.is_symlink():
+        return (pointer.parent / pointer.read_text().strip()).resolve()
+    return pointer.resolve()
+
+
+WINTERMAKER_PATH = _resolve_wintermaker_path()
+DATA_ROOT = Path(os.getenv("WINTERMAKER_DATA", str(PROJECT_ROOT / "data")))
 RAW_ROOT = DATA_ROOT / "raw"
 REGIONS_ROOT = DATA_ROOT / "raw" / "regions"
 OUTPUT_ROOT = DATA_ROOT / "output"
 VIEWER_ROOT = DATA_ROOT / "viewer"
-PIPELINE_ROOT = Path("/app/pipeline/wintermaker")
-WINTERMAKER_PATH = Path("/app/pipeline/wintermaker")
+PIPELINE_ROOT = WINTERMAKER_PATH
 
 
-# Import wintermaker library
-import sys
-sys.path.insert(0, str(WINTERMAKER_PATH))
-from winter_ortho import run_all_async, prepare_region_async, export_viewer_async
+def _import_winter_ortho():
+    if str(WINTERMAKER_PATH) not in sys.path:
+        sys.path.insert(0, str(WINTERMAKER_PATH))
+    from winter_ortho import run_all_async, prepare_region_async, export_viewer_async
+
+    return run_all_async, prepare_region_async, export_viewer_async
+
+
+def normalize_region_name(name: str) -> str:
+    """Wintermaker region names must be lowercase slugs."""
+    slug = name.lower()
+    slug = re.sub(r"[^a-z0-9_-]", "-", slug)
+    slug = re.sub(r"-+", "-", slug).strip("-")
+    if not REGION_NAME_RE.fullmatch(slug):
+        raise ValueError(
+            "name must start with a letter and contain only lowercase letters, digits, _ or -"
+        )
+    return slug
+
+
+def tile_id_for_region(name: str) -> str:
+    return f"{normalize_region_name(name)}_001"
+
+
+def _region_config_for_tile(tile_id: str) -> Path | None:
+    region_name = tile_id.removesuffix("_001") if tile_id.endswith("_001") else tile_id
+    region_config = WINTERMAKER_PATH / "config" / "regions" / f"{region_name}.yaml"
+    return region_config if region_config.is_file() else None
+
+
+def _resolve_config_path(config_path: str | None, tile_id: str | None = None) -> str | None:
+    if config_path and str(config_path).strip():
+        path = Path(config_path)
+        if path.is_file():
+            return str(path)
+
+    if tile_id:
+        region_config = _region_config_for_tile(tile_id)
+        if region_config:
+            return str(region_config)
+
+    return None
+
+
+def normalize_tile_id(tile_id: str, config_path: str | None = None) -> str:
+    if tile_id.endswith("_001"):
+        return tile_id
+
+    region_name = normalize_region_name(tile_id)
+    candidate = f"{region_name}_001"
+    resolved_config = _resolve_config_path(config_path, candidate)
+    if not resolved_config:
+        return candidate
+
+    import yaml
+
+    with open(resolved_config, encoding="utf-8") as handle:
+        tiles = (yaml.safe_load(handle) or {}).get("tiles", {})
+    if candidate in tiles:
+        return candidate
+    if region_name in tiles:
+        return region_name
+    return candidate
 
 
 @celery_app.task(bind=True)
@@ -31,15 +105,17 @@ def prepare_region_task(
     self, project_id: int, name: str, bbox: list[float], dem_year: Optional[int] = None
 ) -> Dict[str, Any]:
     """Prepare a wintermaker region (download + config)."""
-    region_dir = REGIONS_ROOT / name
+    region_name = normalize_region_name(name)
+    region_dir = REGIONS_ROOT / region_name
     extent = ",".join(str(x) for x in bbox)
 
     def on_progress(msg: str) -> None:
         self.update_state(state="PROGRESS", meta={"message": msg})
 
     try:
+        _, prepare_region_async, _ = _import_winter_ortho()
         result = prepare_region_async(
-            name=name,
+            name=region_name,
             extent=extent,
             dem_year=dem_year or 2023,
             on_progress=on_progress,
@@ -48,6 +124,8 @@ def prepare_region_task(
             "status": "success",
             "message": "Region prepared successfully",
             "config_path": result.config_path,
+            "tile_id": result.tile_id,
+            "region_name": region_name,
         }
     except Exception as e:
         return {"status": "failed", "message": str(e)}
@@ -58,23 +136,27 @@ def run_pipeline_task(
     self, project_id: int, tile_id: str, profile: str, config_path: str
 ) -> Dict[str, Any]:
     """Run the full pipeline: harmonize, masks, terrain, snow, render, qa."""
-    config_path_obj = Path(config_path)
+    resolved_tile_id = normalize_tile_id(tile_id, config_path)
+    config_path_obj = _resolve_config_path(config_path, resolved_tile_id)
 
     def on_step(step_name: str, current: int, total: int) -> None:
         progress = current / total if total > 0 else 0
         self.update_state(state="PROGRESS", meta={"step": step_name, "progress": progress})
 
     try:
+        run_all_async, _, _ = _import_winter_ortho()
         result = run_all_async(
-            tile_id=tile_id,
+            tile_id=resolved_tile_id,
             profile_name=profile,
-            config_path=str(config_path_obj) if config_path_obj.exists() else None,
+            config_path=config_path_obj,
             on_step=on_step,
         )
         return {
             "status": "success",
             "message": "Pipeline completed successfully",
             "result": result,
+            "tile_id": resolved_tile_id,
+            "config_path": config_path_obj,
         }
     except Exception as e:
         return {"status": "failed", "message": str(e)}
@@ -85,49 +167,61 @@ def run_snow_pipeline_task(
     self, project_id: int, tile_id: str, profile: str, config_path: str
 ) -> Dict[str, Any]:
     """Run only snow + render pipeline (assuming harmonize/masks/terrain are done)."""
-    config_path_obj = Path(config_path)
+    resolved_tile_id = normalize_tile_id(tile_id, config_path)
+    config_path_obj = _resolve_config_path(config_path, resolved_tile_id)
 
     def on_step(step_name: str, current: int, total: int) -> None:
         progress = current / total if total > 0 else 0
         self.update_state(state="PROGRESS", meta={"step": step_name, "progress": progress})
 
     try:
+        run_all_async, _, _ = _import_winter_ortho()
         result = run_all_async(
-            tile_id=tile_id,
+            tile_id=resolved_tile_id,
             profile_name=profile,
-            config_path=str(config_path_obj) if config_path_obj.exists() else None,
+            config_path=config_path_obj,
             on_step=on_step,
         )
         return {
             "status": "success",
             "message": "Snow pipeline completed successfully",
             "result": result,
+            "tile_id": resolved_tile_id,
+            "config_path": config_path_obj,
         }
     except Exception as e:
         return {"status": "failed", "message": str(e)}
 
 
+def _as_render_params(params: RenderParams | dict) -> RenderParams:
+    if isinstance(params, RenderParams):
+        return params
+    return RenderParams(**params)
+
+
 @celery_app.task(bind=True)
 def export_viewer_task(
-    self, project_id: int, tile_id: str, config_path: str, params: RenderParams
+    self, project_id: int, tile_id: str, config_path: str, params: dict
 ) -> Dict[str, Any]:
     """Export 3D viewer assets for a tile."""
-    config_path_obj = Path(config_path)
+    render_params = _as_render_params(params)
+    resolved_tile_id = normalize_tile_id(tile_id, config_path)
+    config_path_obj = _resolve_config_path(config_path, resolved_tile_id)
 
     try:
+        _, _, export_viewer_async = _import_winter_ortho()
         result = export_viewer_async(
-            tile_id=tile_id,
-            config_path=str(config_path_obj) if config_path_obj.exists() else None,
-            stride=params.stride,
-            max_texture_dim=params.max_texture_dim,
+            tile_id=resolved_tile_id,
+            config_path=config_path_obj,
+            stride=render_params.stride,
+            max_texture_dim=render_params.max_texture_dim,
         )
-        output_dir = VIEWER_ROOT / "data" / tile_id
-        output_dir.mkdir(parents=True, exist_ok=True)
-
         return {
             "status": "success",
             "message": "Viewer exported successfully",
-            "viewer_dir": str(output_dir),
+            "viewer_dir": str(result.output_dir),
+            "tile_id": resolved_tile_id,
+            "scene_url": f"/viewer/data/{resolved_tile_id}/scene.json",
             "result": {
                 "vertex_count": result.vertex_count,
                 "triangle_count": result.triangle_count,

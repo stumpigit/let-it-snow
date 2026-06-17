@@ -44,6 +44,27 @@ class RenderParams(BaseModel):
     stride: int = 2
 
 
+class PrepareRegionRequest(BaseModel):
+    project_id: int
+    name: str
+    bbox: List[float]
+    dem_year: Optional[int] = None
+
+
+class PipelineRequest(BaseModel):
+    project_id: int
+    tile_id: str
+    profile: str
+    config_path: str = ""
+
+
+class ExportViewerRequest(BaseModel):
+    project_id: int
+    tile_id: str
+    config_path: str = ""
+    params: RenderParams
+
+
 class TaskStatusResponse(BaseModel):
     task_id: str
     status: str
