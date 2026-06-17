@@ -23,6 +23,8 @@
   let tileId = '';
   let configPath = '';
   let sceneUrl = '';
+  let textureMode: 'winter' | 'summer' = 'winter';
+  let elevationModel: 'snow_surface' | 'base' = 'snow_surface';
   let renderParams = {
     profile: 'default',
     resolutionM: 0.5,
@@ -35,6 +37,7 @@
 
   // Sidebar state
   let sidebarOpen = true;
+  let taskModalOpen = false;
 
   async function handleCreateProject(
     event: CustomEvent<{ name: string; description: string; bbox: number[] }>,
@@ -96,6 +99,7 @@
   async function startTask(url: string, body?: Record<string, unknown>) {
     actionError = null;
     taskId = null;
+    taskModalOpen = false;
     try {
       const res = await fetch(url, {
         method: 'POST',
@@ -105,9 +109,14 @@
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       taskId = data.task_id;
+      taskModalOpen = true;
     } catch (e: any) {
       actionError = e.message;
     }
+  }
+
+  function dismissTaskModal() {
+    taskModalOpen = false;
   }
 
   async function handlePrepareRegion() {
@@ -335,27 +344,38 @@
               <GPXUpload projectId={selectedProject.id} {apiUrl} />
             </section>
 
-            {#if taskId}
-              <section class="panel progress-panel">
-                <TaskProgress {taskId} {apiUrl} on:complete={handleTaskComplete} />
-              </section>
-            {/if}
           {:else}
             <section class="panel viewer-panel">
               <div class="panel-header">
                 <h3>3D Viewer</h3>
-                <button
-                  type="button"
-                  class="btn-secondary"
-                  on:click={() => {
-                    if (tileId) sceneUrl = `${apiUrl}/viewer/data/${tileId}/scene.json`;
-                  }}
-                  disabled={!tileId}
-                >
-                  Viewer laden
-                </button>
+                <div class="viewer-toolbar">
+                  <label>
+                    Orthofoto
+                    <select bind:value={textureMode}>
+                      <option value="winter">Winter-Orthofoto (Standard)</option>
+                      <option value="summer">Sommer-Orthofoto</option>
+                    </select>
+                  </label>
+                  <label>
+                    Höhenmodell
+                    <select bind:value={elevationModel}>
+                      <option value="snow_surface">Schneedeckenhöhenmodell (Standard)</option>
+                      <option value="base">Sommerhöhenmodell</option>
+                    </select>
+                  </label>
+                  <button
+                    type="button"
+                    class="btn-secondary"
+                    on:click={() => {
+                      if (tileId) sceneUrl = `${apiUrl}/viewer/data/${tileId}/scene.json`;
+                    }}
+                    disabled={!tileId}
+                  >
+                    Viewer laden
+                  </button>
+                </div>
               </div>
-              <ThreeViewer {sceneUrl} showSnow={true} elevationFactor={1.0} />
+              <ThreeViewer {sceneUrl} {textureMode} {elevationModel} elevationFactor={1.0} />
               {#if !sceneUrl}
                 <p class="muted empty-message">
                   <Icon name="cloud" size={48} className="empty-icon" />
@@ -383,6 +403,14 @@
       {/if}
     </main>
   </div>
+
+  {#if taskId && taskModalOpen}
+    <div class="task-modal-backdrop" on:click={dismissTaskModal}>
+      <div class="task-modal" role="dialog" aria-modal="true" on:click|stopPropagation>
+        <TaskProgress {taskId} {apiUrl} on:complete={handleTaskComplete} on:dismiss={dismissTaskModal} />
+      </div>
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -600,6 +628,29 @@
     margin: 0;
   }
 
+  .viewer-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+
+  .viewer-toolbar label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    color: #cbd5e1;
+    font-size: 0.85rem;
+  }
+
+  .viewer-toolbar select {
+    background: #0f172a;
+    border: 1px solid #475569;
+    border-radius: 0.5rem;
+    color: #e2e8f0;
+    padding: 0.4rem 0.6rem;
+    font: inherit;
+  }
+
   .tabs {
     display: flex;
     gap: 0.25rem;
@@ -734,11 +785,23 @@
     box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.2);
   }
 
-  /* Progress Panel */
-  .progress-panel .task-progress {
+  .task-modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(2, 6, 23, 0.72);
+    backdrop-filter: blur(3px);
+    z-index: 1200;
+    display: grid;
+    place-items: center;
     padding: 1rem;
-    background: #0f172a;
-    border-radius: 0.5rem;
+  }
+
+  .task-modal {
+    width: min(780px, 95vw);
+    max-height: 90vh;
+    overflow: auto;
+    border-radius: 14px;
+    box-shadow: 0 24px 70px rgba(0, 0, 0, 0.5);
   }
 
   /* Viewer Panel */

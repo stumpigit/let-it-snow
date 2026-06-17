@@ -18,8 +18,10 @@ type SceneMeta = {
 };
 
 export type ViewerLoadOptions = {
-  showSnow?: boolean;
+  textureMode?: 'winter' | 'summer';
+  elevationModel?: 'snow_surface' | 'base';
   elevationFactor?: number;
+  onProgress?: (stage: string, progress: number) => void;
 };
 
 export class TerrainViewer {
@@ -39,6 +41,8 @@ export class TerrainViewer {
     this.container = container;
 
     const canvas = document.createElement('canvas');
+    canvas.style.position = 'relative';
+    canvas.style.zIndex = '0';
     container.appendChild(canvas);
 
     this.renderer = new THREE.WebGLRenderer({
@@ -82,6 +86,11 @@ export class TerrainViewer {
 
   async load(sceneUrl: string, options: ViewerLoadOptions = {}): Promise<string> {
     this.disposeTerrain();
+    const report = options.onProgress;
+    const step = (label: string, progress: number) => report?.(label, progress);
+
+    step('Lade Szenen-Metadaten…', 0.05);
+    await this.yieldFrame();
 
     const base = sceneUrl.replace(/\/scene\.json$/, '');
     const metaResponse = await fetch(sceneUrl);
@@ -90,19 +99,39 @@ export class TerrainViewer {
     }
 
     this.sceneMeta = (await metaResponse.json()) as SceneMeta;
-    this.activeElevationModel =
-      options.showSnow !== false && this.sceneMeta.has_snow_surface
-        ? 'snow_surface'
-        : 'base';
+    step('Bereite Geometrie vor…', 0.12);
+    await this.yieldFrame();
 
-    const [positionsBuf, uvsBuf, indicesBuf, winterTexture] = await Promise.all([
-      this.loadBinary(`${base}/${this.sceneMeta.files.positions}`),
-      this.loadBinary(`${base}/${this.sceneMeta.files.uvs}`),
-      this.loadBinary(`${base}/${this.sceneMeta.files.indices}`),
-      this.loadTexture(`${base}/${this.sceneMeta.textures.winter}`),
-    ]);
+    const requestedModel = options.elevationModel ?? 'snow_surface';
+    this.activeElevationModel =
+      requestedModel === 'snow_surface' && this.sceneMeta.has_snow_surface ? 'snow_surface' : 'base';
+
+    const positionsBuf = await this.loadBinary(`${base}/${this.sceneMeta.files.positions}`);
+    step('Lade Vertex-Positionen…', 0.22);
+
+    const uvsBuf = await this.loadBinary(`${base}/${this.sceneMeta.files.uvs}`);
+    step('Lade Texturkoordinaten…', 0.32);
+
+    const indicesBuf = await this.loadBinary(`${base}/${this.sceneMeta.files.indices}`);
+    step('Lade Mesh-Indizes…', 0.42);
+
+    const winterTexture = await this.loadTexture(`${base}/${this.sceneMeta.textures.winter}`);
+    step('Lade Winter-Orthofoto…', 0.58);
+
+    let summerTexture: THREE.Texture | null = null;
+    if (this.sceneMeta.textures.summer) {
+      try {
+        summerTexture = await this.loadTexture(`${base}/${this.sceneMeta.textures.summer}`);
+        step('Lade Sommer-Orthofoto…', 0.68);
+      } catch {
+        summerTexture = null;
+      }
+    }
 
     this.heightModels = await this.loadElevationModels(base, this.sceneMeta);
+    step('Lade Höhenmodelle…', 0.82);
+    await this.yieldFrame();
+    step('Erzeuge 3D-Mesh…', 0.9);
 
     const positions = new Float32Array(positionsBuf);
     const uvs = new Float32Array(uvsBuf);
@@ -121,13 +150,18 @@ export class TerrainViewer {
     geometry.computeBoundingBox();
     geometry.computeBoundingSphere();
 
-    const material = this.createTerrainMaterial(winterTexture);
+    const material = this.createTerrainMaterial(
+      options.textureMode ?? 'winter',
+      winterTexture,
+      summerTexture,
+    );
     this.terrainMesh = new THREE.Mesh(geometry, material);
     this.terrainMesh.frustumCulled = false;
     this.scene.add(this.terrainMesh);
 
     this.applyExaggeration(options.elevationFactor ?? 1.0);
     this.frameCamera(this.terrainMesh);
+    step('Szene geladen', 1);
 
     const triangles = Math.floor(this.sceneMeta.index_count / 3).toLocaleString();
     const vertices = this.sceneMeta.vertex_count.toLocaleString();
@@ -166,6 +200,10 @@ export class TerrainViewer {
     this.render();
   }
 
+  private yieldFrame(): Promise<void> {
+    return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+  }
+
   private async loadBinary(url: string): Promise<ArrayBuffer> {
     const response = await fetch(url);
     if (!response.ok) {
@@ -186,9 +224,14 @@ export class TerrainViewer {
     return texture;
   }
 
-  private createTerrainMaterial(texture: THREE.Texture): THREE.MeshStandardMaterial {
+  private createTerrainMaterial(
+    textureMode: 'winter' | 'summer',
+    winterTexture: THREE.Texture,
+    summerTexture: THREE.Texture | null,
+  ): THREE.MeshStandardMaterial {
+    const map = textureMode === 'summer' && summerTexture ? summerTexture : winterTexture;
     return new THREE.MeshStandardMaterial({
-      map: texture,
+      map,
       roughness: 0.92,
       metalness: 0.0,
       side: THREE.DoubleSide,

@@ -3,6 +3,7 @@ import re
 import subprocess
 import shutil
 import sys
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -11,6 +12,8 @@ from app.celery_app import celery_app
 from app.models import Project, GPXTrack
 from app.schemas import RenderParams
 from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -38,9 +41,9 @@ PIPELINE_ROOT = WINTERMAKER_PATH
 def _import_winter_ortho():
     if str(WINTERMAKER_PATH) not in sys.path:
         sys.path.insert(0, str(WINTERMAKER_PATH))
-    from winter_ortho import run_all_async, prepare_region_async, export_viewer_async
+    from winter_ortho import run_all_async, run_snow_async, prepare_region_async, export_viewer_async
 
-    return run_all_async, prepare_region_async, export_viewer_async
+    return run_all_async, run_snow_async, prepare_region_async, export_viewer_async
 
 
 def normalize_region_name(name: str) -> str:
@@ -111,9 +114,10 @@ def prepare_region_task(
 
     def on_progress(msg: str) -> None:
         self.update_state(state="PROGRESS", meta={"message": msg})
+        logger.info("prepare_region: %s", msg)
 
     try:
-        _, prepare_region_async, _ = _import_winter_ortho()
+        _, _, prepare_region_async, _ = _import_winter_ortho()
         result = prepare_region_async(
             name=region_name,
             extent=extent,
@@ -138,13 +142,69 @@ def run_pipeline_task(
     """Run the full pipeline: harmonize, masks, terrain, snow, render, qa."""
     resolved_tile_id = normalize_tile_id(tile_id, config_path)
     config_path_obj = _resolve_config_path(config_path, resolved_tile_id)
+    started_at = datetime.utcnow().isoformat() + "Z"
+    steps = [
+        "Datenharmonisierung",
+        "Geometrische Masken",
+        "Terrain-Features",
+        "Schneeoberfläche",
+        "Schneebedeckungsmodell",
+        "Winter-Rendering",
+        "Qualitätskontrolle",
+    ]
+
+    self.update_state(
+        state="PROGRESS",
+        meta={
+            "step": "Initialisierung",
+            "message": "Task gestartet...",
+            "progress": 0,
+            "current": 0,
+            "total": len(steps),
+            "steps": steps,
+            "project_id": project_id,
+            "tile_id": resolved_tile_id,
+            "profile": profile,
+            "config_path": config_path_obj,
+            "started_at": started_at,
+            "updated_at": datetime.utcnow().isoformat() + "Z",
+        },
+    )
+    active_step = ""
 
     def on_step(step_name: str, current: int, total: int) -> None:
-        progress = current / total if total > 0 else 0
-        self.update_state(state="PROGRESS", meta={"step": step_name, "progress": progress})
+        if total <= 0:
+            return
+        nonlocal active_step
+        if step_name.startswith(("→ ", "i ", "! ")):
+            detail_message = step_name
+            step_title = active_step or (steps[current - 1] if 0 < current <= len(steps) else step_name)
+        else:
+            active_step = step_name
+            detail_message = step_name
+            step_title = step_name
+        progress = current / total
+        logger.info("pipeline [%d/%d]: %s", current, total, step_name)
+        self.update_state(
+            state="PROGRESS",
+            meta={
+                "step": step_title,
+                "message": detail_message,
+                "progress": progress,
+                "current": current,
+                "total": total,
+                "steps": steps,
+                "project_id": project_id,
+                "tile_id": resolved_tile_id,
+                "profile": profile,
+                "config_path": config_path_obj,
+                "started_at": started_at,
+                "updated_at": datetime.utcnow().isoformat() + "Z",
+            },
+        )
 
     try:
-        run_all_async, _, _ = _import_winter_ortho()
+        run_all_async, _, _, _ = _import_winter_ortho()
         result = run_all_async(
             tile_id=resolved_tile_id,
             profile_name=profile,
@@ -169,14 +229,67 @@ def run_snow_pipeline_task(
     """Run only snow + render pipeline (assuming harmonize/masks/terrain are done)."""
     resolved_tile_id = normalize_tile_id(tile_id, config_path)
     config_path_obj = _resolve_config_path(config_path, resolved_tile_id)
+    started_at = datetime.utcnow().isoformat() + "Z"
+    steps = [
+        "Schneeoberfläche",
+        "Schneebedeckungsmodell",
+        "Winter-Rendering",
+        "Qualitätskontrolle",
+    ]
+
+    self.update_state(
+        state="PROGRESS",
+        meta={
+            "step": "Initialisierung",
+            "message": "Task gestartet...",
+            "progress": 0,
+            "current": 0,
+            "total": len(steps),
+            "steps": steps,
+            "project_id": project_id,
+            "tile_id": resolved_tile_id,
+            "profile": profile,
+            "config_path": config_path_obj,
+            "started_at": started_at,
+            "updated_at": datetime.utcnow().isoformat() + "Z",
+        },
+    )
+    active_step = ""
 
     def on_step(step_name: str, current: int, total: int) -> None:
-        progress = current / total if total > 0 else 0
-        self.update_state(state="PROGRESS", meta={"step": step_name, "progress": progress})
+        if total <= 0:
+            return
+        nonlocal active_step
+        if step_name.startswith(("→ ", "i ", "! ")):
+            detail_message = step_name
+            step_title = active_step or (steps[current - 1] if 0 < current <= len(steps) else step_name)
+        else:
+            active_step = step_name
+            detail_message = step_name
+            step_title = step_name
+        progress = current / total
+        logger.info("snow pipeline [%d/%d]: %s", current, total, step_name)
+        self.update_state(
+            state="PROGRESS",
+            meta={
+                "step": step_title,
+                "message": detail_message,
+                "progress": progress,
+                "current": current,
+                "total": total,
+                "steps": steps,
+                "project_id": project_id,
+                "tile_id": resolved_tile_id,
+                "profile": profile,
+                "config_path": config_path_obj,
+                "started_at": started_at,
+                "updated_at": datetime.utcnow().isoformat() + "Z",
+            },
+        )
 
     try:
-        run_all_async, _, _ = _import_winter_ortho()
-        result = run_all_async(
+        _, run_snow_async, _, _ = _import_winter_ortho()
+        result = run_snow_async(
             tile_id=resolved_tile_id,
             profile_name=profile,
             config_path=config_path_obj,
@@ -209,7 +322,7 @@ def export_viewer_task(
     config_path_obj = _resolve_config_path(config_path, resolved_tile_id)
 
     try:
-        _, _, export_viewer_async = _import_winter_ortho()
+        _, _, _, export_viewer_async = _import_winter_ortho()
         result = export_viewer_async(
             tile_id=resolved_tile_id,
             config_path=config_path_obj,

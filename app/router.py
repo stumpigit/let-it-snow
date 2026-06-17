@@ -1,16 +1,17 @@
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, File, Form, UploadFile
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, JSON, Text, select
 from sqlalchemy.orm import Session, sessionmaker, declarative_base
 from datetime import datetime
+from pathlib import Path
 from typing import Optional, List
 import os
+import shutil
 import subprocess
 
 from app.schemas import (
     ProjectCreate,
     ProjectUpdate,
     ProjectResponse,
-    GPXTrackCreate,
     GPXTrackResponse,
     RenderParams,
     PrepareRegionRequest,
@@ -100,16 +101,39 @@ def delete_project(project_id: int, db: Session = Depends(get_db)):
     db.commit()
     return {"message": "Project deleted"}
 
-@router.post("/gpx")
-def upload_gpx(track: GPXTrackCreate, db: Session = Depends(get_db)):
-    # In production, handle file upload here
+@router.post("/gpx", response_model=GPXTrackResponse)
+async def upload_gpx(
+    file: UploadFile = File(...),
+    project_id: int = Form(...),
+    name: Optional[str] = Form(None),
+    db: Session = Depends(get_db),
+):
+    db_project = db.execute(
+        select(Project).where(Project.id == project_id)
+    ).scalars().first()
+    if not db_project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    track_name = name or file.filename or "track"
+
     db_track = GPXTrack(
-        project_id=track.project_id,
-        name=track.name,
-        file_path=track.file_path,
-        created_at=datetime.utcnow()
+        project_id=project_id,
+        name=track_name,
+        file_path="",
+        created_at=datetime.utcnow(),
     )
     db.add(db_track)
+    db.commit()
+    db.refresh(db_track)
+
+    data_root = Path(os.getenv("WINTERMAKER_DATA", str(Path(__file__).resolve().parent.parent / "data")))
+    dest = data_root / "raw" / "gpx" / f"project_{project_id}_{db_track.id}.gpx"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    with dest.open("wb") as out:
+        shutil.copyfileobj(file.file, out)
+
+    db_track.file_path = str(dest)
     db.commit()
     db.refresh(db_track)
     return db_track
