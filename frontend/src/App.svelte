@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import ProjectList from './lib/ProjectList.svelte';
   import GPXUpload from './lib/GPXUpload.svelte';
   import TaskProgress from './lib/TaskProgress.svelte';
@@ -37,7 +38,21 @@
   let selectedProject = $state<Project | null>(null);
   let view = $state<'home' | 'project'>('home');
   let activeTab = $state<'pipeline' | 'viewer'>('pipeline');
-  let sidebarOpen = $state(true);
+  const mobileQuery = typeof window !== 'undefined' ? window.matchMedia('(max-width: 800px)') : null;
+  let isMobile = $state(mobileQuery?.matches ?? false);
+  let sidebarOpen = $state(!(mobileQuery?.matches ?? false));
+
+  onMount(() => {
+    const mq = window.matchMedia('(max-width: 800px)');
+    const apply = (mobile: boolean) => {
+      isMobile = mobile;
+      sidebarOpen = !mobile;
+    };
+    apply(mq.matches);
+    const onChange = (e: MediaQueryListEvent) => apply(e.matches);
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  });
   let showNewProject = $state(false);
   let actionError = $state<string | null>(null);
   let projectListVersion = $state(0);
@@ -57,6 +72,7 @@
   let resolutionM = $state(0.5);
   let maxTextureDim = $state(8192);
   let meshStride = $state(2);
+  let sceneRevision = $state(0);
 
   // --- Helpers ---
   function regionSlug(name: string): string {
@@ -87,6 +103,12 @@
     } catch (e: any) { actionError = e.message; }
   }
 
+  function buildSceneUrl(tile?: string): string {
+    const id = tile ?? tileId;
+    if (!id) return '';
+    return `${apiUrl}/viewer/data/${id}/scene.json?v=${sceneRevision}`;
+  }
+
   function applyPipelineStatus(status: {
     tile_id?: string;
     config_path?: string | null;
@@ -95,18 +117,20 @@
   }) {
     if (typeof status.tile_id === 'string') tileId = status.tile_id;
     if (typeof status.config_path === 'string') configPath = status.config_path;
-    if (typeof status.scene_url === 'string') sceneUrl = `${apiUrl}${status.scene_url}`;
+    if (typeof status.scene_url === 'string') sceneUrl = buildSceneUrl(status.tile_id);
     if (status.progress) {
       pipelineProgress = { ...emptyProgress(), ...status.progress };
     }
   }
 
   async function handleSelectProject(project: Project) {
+    if (isMobile) sidebarOpen = false;
     selectedProject = project;
     tileId = `${regionSlug(project.name)}_001`;
     actionError = null;
     taskId = null;
     configPath = '';
+    sceneRevision += 1;
     sceneUrl = '';
     activeTab = 'pipeline';
     pipelineProgress = emptyProgress();
@@ -198,7 +222,12 @@
     if (event.detail.status === 'SUCCESS') {
       if (typeof result.config_path === 'string') configPath = result.config_path;
       if (typeof result.tile_id === 'string') tileId = result.tile_id;
-      if (typeof result.scene_url === 'string') sceneUrl = `${apiUrl}${result.scene_url}`;
+      if (typeof result.scene_url === 'string') {
+        sceneRevision += 1;
+        sceneUrl = buildSceneUrl(
+          typeof result.tile_id === 'string' ? result.tile_id : tileId,
+        );
+      }
       currentStage = '';
       pipelineRunning = false;
 
@@ -222,7 +251,11 @@
   }
 
   function toggleSidebar() { sidebarOpen = !sidebarOpen; }
-  function loadScene() { if (tileId) sceneUrl = `${apiUrl}/viewer/data/${tileId}/scene.json`; }
+  function loadScene() {
+    if (!tileId) return;
+    sceneRevision += 1;
+    sceneUrl = buildSceneUrl(tileId);
+  }
   function dismissTaskModal() { taskModalOpen = false; }
   function resetToHome() {
     view = 'home';
@@ -247,8 +280,13 @@
   <!-- Header -->
   <header class="app-header">
     <div class="header-left">
-      <button class="sidebar-toggle" on:click={toggleSidebar} aria-label="Sidebar umschalten">
-        <Icon name="menu" size={22} />
+      <button
+        class="sidebar-toggle"
+        on:click={toggleSidebar}
+        aria-label={sidebarOpen ? 'Projektmenü schliessen' : 'Projektmenü öffnen'}
+        aria-expanded={sidebarOpen}
+      >
+        <Icon name={sidebarOpen ? 'x' : 'menu'} size={22} />
       </button>
       <button class="logo" type="button" on:click={resetToHome} aria-label="Zur Startseite wechseln">
         <svg class="logo-icon" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -273,14 +311,30 @@
   </header>
 
   <div class="layout">
+    {#if isMobile && sidebarOpen}
+      <button
+        type="button"
+        class="sidebar-backdrop"
+        aria-label="Projektmenü schliessen"
+        on:click={() => (sidebarOpen = false)}
+      ></button>
+    {/if}
+
     <!-- Sidebar -->
-    {#if sidebarOpen}
-      <aside class="sidebar">
+    <aside class="sidebar" class:open={sidebarOpen}>
         <section class="sidebar-section">
           <div class="section-header">
             <Icon name="folder" size={16} />
             <h3>Projekte</h3>
           </div>
+        
+          <section class="sidebar-section">
+            <button class="btn-create-project" on:click={() => (showNewProject = true)}>
+              <Icon name="cloud-upload" size={16} />
+              <span>Neues Projekt erstellen</span>
+            </button>
+          </section>
+        
           <ProjectList
             {apiUrl}
             refreshKey={projectListVersion}
@@ -288,54 +342,10 @@
             on:select={(e: CustomEvent<Project>) => handleSelectProject(e.detail)}
           />
         </section>
-
-        <section class="sidebar-section">
-          <button class="btn-create-project" on:click={() => (showNewProject = true)}>
-            <Icon name="cloud-upload" size={16} />
-            <span>Neues Projekt erstellen</span>
-          </button>
-        </section>
-
-        {#if selectedProject}
-          <section class="sidebar-section">
-            <div class="section-header active">
-              <Icon name="folder-open" size={16} />
-              <h3>Aktiv</h3>
-            </div>
-            <div class="active-info">
-              <strong>{selectedProject.name}</strong>
-              {#if selectedProject.description}<span class="desc">{selectedProject.description}</span>{/if}
-              <span class="bbox">{selectedProject.bbox.join(', ')}</span>
-            </div>
-
-            {#if pipelineRunning}
-              <div class="pipeline-progress">
-                <div class="progress-header">
-                  <span class="progress-spinner"><Icon name="refresh" size={12} /></span>
-                  <span>Pipeline läuft...</span>
-                </div>
-                <div class="progress-bar">
-                  {#each ['prepare', 'harmonize', 'masks', 'terrain', 'snow', 'render', 'qa', 'viewer'] as stage}
-                    <div
-                      class="progress-segment"
-                      style="width: {pipelineProgress[stage as keyof typeof pipelineProgress]}%; background: {
-                        stage === 'prepare' ? '#3b82f6' :
-                        stage === 'harmonize' || stage === 'masks' || stage === 'terrain' ? '#8b5cf6' :
-                        stage === 'snow' || stage === 'render' ? '#a78bfa' :
-                        '#10b981'
-                      }"
-                    ></div>
-                  {/each}
-                </div>
-              </div>
-            {/if}
-          </section>
-        {/if}
-      </aside>
-    {/if}
+    </aside>
 
     <!-- Main content -->
-    <main class="workspace">
+  <main class="workspace" class:workspace-viewer={view === 'project' && activeTab === 'viewer'}>
       {#if view === 'home'}
         <!-- Welcome / Home state -->
         <div class="home-state">
@@ -591,11 +601,39 @@
     display: grid;
     grid-template-columns: 300px 1fr;
     flex: 1;
+    min-height: 0;
   }
 
   @media (max-width: 800px) {
     .layout { grid-template-columns: 1fr; }
-    .sidebar { display: none; position: fixed; inset: 60px 0 auto 0; z-index: 90; top: 60px; width: 100%; }
+
+    .sidebar {
+      position: fixed;
+      top: 60px;
+      left: 0;
+      bottom: 0;
+      width: min(300px, 88vw);
+      z-index: 90;
+      transform: translateX(-100%);
+      transition: transform 0.22s ease;
+      box-shadow: none;
+    }
+
+    .sidebar.open {
+      transform: translateX(0);
+      box-shadow: 4px 0 24px rgba(0, 0, 0, 0.4);
+    }
+  }
+
+  .sidebar-backdrop {
+    position: fixed;
+    inset: 60px 0 0 0;
+    z-index: 85;
+    background: rgba(2, 6, 23, 0.65);
+    backdrop-filter: blur(2px);
+    border: none;
+    padding: 0;
+    cursor: pointer;
   }
 
   /* ─── Sidebar ─── */
@@ -755,6 +793,7 @@
   /* ─── Workspace ─── */
   .workspace {
     flex: 1;
+    min-height: 0;
     padding: 1.5rem;
     display: flex;
     flex-direction: column;
@@ -762,8 +801,18 @@
     overflow-y: auto;
   }
 
+  .workspace.workspace-viewer {
+    overflow: hidden;
+  }
+
   /* ─── Project panel ─── */
-  .project-panel { flex: 1; display: flex; flex-direction: column; gap: 1.25rem; }
+  .project-panel {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+  }
 
   .panel-header { display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap; }
   .panel-header h2 { margin: 0; font-size: 1.25rem; color: #f8fafc; }
@@ -827,7 +876,13 @@
   }
 
   /* ─── Viewer ─── */
-  .viewer-panel { flex: 1; display: flex; flex-direction: column; gap: 0.75rem; }
+  .viewer-panel {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
 
   .viewer-toolbar {
     display: flex;
@@ -857,7 +912,9 @@
 
   .viewer-container {
     flex: 1;
-    min-height: 500px;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
     border-radius: 0.75rem;
     overflow: hidden;
     background: #0f172a;

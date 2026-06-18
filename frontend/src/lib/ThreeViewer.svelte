@@ -20,27 +20,27 @@
   let error = $state('');
   let loadProgress = $state(0);
   let loading = $state(false);
+  let loadedSceneUrl = $state('');
 
   onMount(() => {
     viewer = new TerrainViewer(container);
     return () => {
       viewer?.dispose();
       viewer = null;
+      loadedSceneUrl = '';
     };
   });
 
   $effect(() => {
     const activeViewer = viewer;
     const url = sceneUrl;
-    const tex = textureMode;
-    const elev = elevationModel;
-    const factor = elevationFactor;
 
     if (!url) {
       status = 'Viewer-Daten exportieren, um das Gelände anzuzeigen';
       loading = false;
       loadProgress = 0;
       error = '';
+      loadedSceneUrl = '';
       return;
     }
 
@@ -52,6 +52,8 @@
       return;
     }
 
+    if (url === loadedSceneUrl) return;
+
     let cancelled = false;
 
     (async () => {
@@ -62,10 +64,10 @@
       await tick();
 
       try {
-        const message = await activeViewer.load(url, {
-          textureMode: tex,
-          elevationModel: elev,
-          elevationFactor: factor,
+        const message = await activeViewer.loadScene(url, {
+          textureMode,
+          elevationModel,
+          elevationFactor,
           onProgress: (stage, progress) => {
             if (cancelled) return;
             status = stage;
@@ -73,6 +75,7 @@
           },
         });
         if (!cancelled) {
+          loadedSceneUrl = url;
           status = message;
           loadProgress = 1;
           await tick();
@@ -83,6 +86,7 @@
           error = e instanceof Error ? e.message : String(e);
           status = 'Laden fehlgeschlagen';
           loading = false;
+          loadedSceneUrl = '';
         }
       }
     })();
@@ -90,6 +94,27 @@
     return () => {
       cancelled = true;
     };
+  });
+
+  $effect(() => {
+    const activeViewer = viewer;
+    const url = sceneUrl;
+    const tex = textureMode;
+    const elev = elevationModel;
+    const factor = elevationFactor;
+
+    if (!activeViewer || !url || url !== loadedSceneUrl) return;
+
+    try {
+      status = activeViewer.updateOptions({
+        textureMode: tex,
+        elevationModel: elev,
+        elevationFactor: factor,
+      });
+      error = '';
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    }
   });
 </script>
 
@@ -111,8 +136,6 @@
   <div class="viewer-status">
     {#if error}
       <span class="error">{error}</span>
-    {:else}
-      <span>{status}</span>
     {/if}
   </div>
 </div>
@@ -122,14 +145,15 @@
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
-    min-height: 420px;
-    height: 55vh;
+    flex: 1;
+    min-height: 0;
+    height: 100%;
   }
 
   .viewer-stage {
     position: relative;
     flex: 1;
-    min-height: 360px;
+    min-height: 0;
   }
 
   .viewer-container {
@@ -150,6 +174,7 @@
   }
 
   .viewer-status {
+    flex-shrink: 0;
     font-size: 0.875rem;
     color: #94a3b8;
     display: grid;

@@ -1,5 +1,8 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { Line2 } from 'three/addons/lines/Line2.js';
+import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
+import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 
 type SceneMeta = {
   tile_id: string;
@@ -15,6 +18,14 @@ type SceneMeta = {
     indices: string;
   };
   tracks_file?: string;
+  track_count?: number;
+};
+
+type TrackSource = {
+  x: Float32Array;
+  heights: Float32Array;
+  z: Float32Array;
+  snowHeights: Float32Array | null;
 };
 
 export type ViewerLoadOptions = {
@@ -24,6 +35,45 @@ export type ViewerLoadOptions = {
   onProgress?: (stage: string, progress: number) => void;
 };
 
+const binaryCache = new Map<string, Promise<ArrayBuffer>>();
+const textureCache = new Map<string, Promise<THREE.Texture>>();
+
+function fetchBinary(url: string): Promise<ArrayBuffer> {
+  let cached = binaryCache.get(url);
+  if (!cached) {
+    cached = fetch(url).then((response) => {
+      if (!response.ok) {
+        binaryCache.delete(url);
+        throw new Error(`File not found: ${url}`);
+      }
+      return response.arrayBuffer();
+    });
+    binaryCache.set(url, cached);
+  }
+  return cached;
+}
+
+function fetchTexture(url: string, renderer: THREE.WebGLRenderer): Promise<THREE.Texture> {
+  let cached = textureCache.get(url);
+  if (!cached) {
+    const loader = new THREE.TextureLoader();
+    cached = loader.loadAsync(url).then((texture) => {
+      texture.colorSpace = THREE.SRGBColorSpace;
+      texture.flipY = true;
+      texture.generateMipmaps = true;
+      texture.minFilter = THREE.LinearMipmapLinearFilter;
+      texture.magFilter = THREE.LinearFilter;
+      texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
+      return texture;
+    }).catch((error) => {
+      textureCache.delete(url);
+      throw error;
+    });
+    textureCache.set(url, cached);
+  }
+  return cached;
+}
+
 export class TerrainViewer {
   private container: HTMLElement;
   private renderer: THREE.WebGLRenderer;
@@ -31,9 +81,16 @@ export class TerrainViewer {
   private camera: THREE.PerspectiveCamera;
   private controls: OrbitControls;
   private terrainMesh: THREE.Mesh | null = null;
+  private trackLines: Line2[] = [];
+  private trackSources: TrackSource[] = [];
   private heightModels: Record<string, Float32Array | null> | null = null;
   private activeElevationModel = 'base';
   private sceneMeta: SceneMeta | null = null;
+  private loadedSceneUrl: string | null = null;
+  private winterTexture: THREE.Texture | null = null;
+  private summerTexture: THREE.Texture | null = null;
+  private currentTextureMode: 'winter' | 'summer' = 'winter';
+  private currentElevationFactor = 1.0;
   private animationId: number | null = null;
   private resizeObserver: ResizeObserver;
 
@@ -84,7 +141,11 @@ export class TerrainViewer {
     this.controls.addEventListener('change', () => this.render());
   }
 
-  async load(sceneUrl: string, options: ViewerLoadOptions = {}): Promise<string> {
+  async loadScene(sceneUrl: string, options: ViewerLoadOptions = {}): Promise<string> {
+    if (this.loadedSceneUrl === sceneUrl && this.terrainMesh) {
+      return this.updateOptions(options);
+    }
+
     this.disposeTerrain();
     const report = options.onProgress;
     const step = (label: string, progress: number) => report?.(label, progress);
@@ -92,7 +153,7 @@ export class TerrainViewer {
     step('Lade Szenen-Metadaten…', 0.05);
     await this.yieldFrame();
 
-    const base = sceneUrl.replace(/\/scene\.json$/, '');
+    const base = sceneUrl.replace(/\/scene\.json(?:\?.*)?$/, '');
     const metaResponse = await fetch(sceneUrl);
     if (!metaResponse.ok) {
       throw new Error(`Scene not found: ${sceneUrl}`);
@@ -106,25 +167,25 @@ export class TerrainViewer {
     this.activeElevationModel =
       requestedModel === 'snow_surface' && this.sceneMeta.has_snow_surface ? 'snow_surface' : 'base';
 
-    const positionsBuf = await this.loadBinary(`${base}/${this.sceneMeta.files.positions}`);
+    const positionsBuf = await fetchBinary(`${base}/${this.sceneMeta.files.positions}`);
     step('Lade Vertex-Positionen…', 0.22);
 
-    const uvsBuf = await this.loadBinary(`${base}/${this.sceneMeta.files.uvs}`);
+    const uvsBuf = await fetchBinary(`${base}/${this.sceneMeta.files.uvs}`);
     step('Lade Texturkoordinaten…', 0.32);
 
-    const indicesBuf = await this.loadBinary(`${base}/${this.sceneMeta.files.indices}`);
+    const indicesBuf = await fetchBinary(`${base}/${this.sceneMeta.files.indices}`);
     step('Lade Mesh-Indizes…', 0.42);
 
-    const winterTexture = await this.loadTexture(`${base}/${this.sceneMeta.textures.winter}`);
+    this.winterTexture = await fetchTexture(`${base}/${this.sceneMeta.textures.winter}`, this.renderer);
     step('Lade Winter-Orthofoto…', 0.58);
 
-    let summerTexture: THREE.Texture | null = null;
+    this.summerTexture = null;
     if (this.sceneMeta.textures.summer) {
       try {
-        summerTexture = await this.loadTexture(`${base}/${this.sceneMeta.textures.summer}`);
+        this.summerTexture = await fetchTexture(`${base}/${this.sceneMeta.textures.summer}`, this.renderer);
         step('Lade Sommer-Orthofoto…', 0.68);
       } catch {
-        summerTexture = null;
+        this.summerTexture = null;
       }
     }
 
@@ -150,22 +211,56 @@ export class TerrainViewer {
     geometry.computeBoundingBox();
     geometry.computeBoundingSphere();
 
+    this.currentTextureMode = options.textureMode ?? 'winter';
+    this.currentElevationFactor = options.elevationFactor ?? 1.0;
+
     const material = this.createTerrainMaterial(
-      options.textureMode ?? 'winter',
-      winterTexture,
-      summerTexture,
+      this.currentTextureMode,
+      this.winterTexture,
+      this.summerTexture,
     );
     this.terrainMesh = new THREE.Mesh(geometry, material);
     this.terrainMesh.frustumCulled = false;
     this.scene.add(this.terrainMesh);
 
-    this.applyExaggeration(options.elevationFactor ?? 1.0);
+    this.applyExaggeration(this.currentElevationFactor);
+
+    step('Lade GPX-Tracks…', 0.94);
+    await this.loadTracks(base, this.sceneMeta, this.activeElevationModel, this.currentElevationFactor);
     this.frameCamera(this.terrainMesh);
     step('Szene geladen', 1);
 
-    const triangles = Math.floor(this.sceneMeta.index_count / 3).toLocaleString();
-    const vertices = this.sceneMeta.vertex_count.toLocaleString();
-    return `${this.sceneMeta.tile_id} · ${vertices} vertices · ${triangles} triangles`;
+    this.loadedSceneUrl = sceneUrl;
+
+    return this.statusMessage();
+  }
+
+  updateOptions(options: ViewerLoadOptions = {}): string {
+    if (!this.terrainMesh || !this.sceneMeta) {
+      throw new Error('Keine Szene geladen');
+    }
+
+    const textureMode = options.textureMode ?? this.currentTextureMode;
+    const elevationModel = options.elevationModel ?? this.activeElevationModel;
+    const elevationFactor = options.elevationFactor ?? this.currentElevationFactor;
+
+    if (textureMode !== this.currentTextureMode) {
+      this.setTextureMode(textureMode);
+    }
+
+    const resolvedModel =
+      elevationModel === 'snow_surface' && this.sceneMeta.has_snow_surface ? 'snow_surface' : 'base';
+    if (resolvedModel !== this.activeElevationModel) {
+      this.setElevationModel(resolvedModel);
+    }
+
+    if (elevationFactor !== this.currentElevationFactor) {
+      this.currentElevationFactor = elevationFactor;
+      this.applyExaggeration(elevationFactor);
+    }
+
+    this.render();
+    return this.statusMessage();
   }
 
   dispose(): void {
@@ -178,6 +273,32 @@ export class TerrainViewer {
     this.controls.dispose();
     this.renderer.dispose();
     this.container.replaceChildren();
+  }
+
+  private statusMessage(): string {
+    if (!this.sceneMeta) return 'Keine Szene geladen';
+    const triangles = Math.floor(this.sceneMeta.index_count / 3).toLocaleString();
+    const vertices = this.sceneMeta.vertex_count.toLocaleString();
+    const trackCount = this.sceneMeta.track_count ?? this.trackLines.length;
+    const trackLabel =
+      trackCount > 0 ? ` · ${trackCount} GPX-Track${trackCount === 1 ? '' : 's'}` : '';
+    return `${this.sceneMeta.tile_id} · ${vertices} vertices · ${triangles} triangles${trackLabel}`;
+  }
+
+  private setTextureMode(textureMode: 'winter' | 'summer'): void {
+    if (!this.terrainMesh || !this.winterTexture) return;
+    const map =
+      textureMode === 'summer' && this.summerTexture ? this.summerTexture : this.winterTexture;
+    const material = this.terrainMesh.material as THREE.MeshStandardMaterial;
+    material.map = map;
+    material.needsUpdate = true;
+    this.currentTextureMode = textureMode;
+  }
+
+  private setElevationModel(model: 'snow_surface' | 'base'): void {
+    if (!this.heightModels || model === this.activeElevationModel) return;
+    this.activeElevationModel = model;
+    this.applyExaggeration(this.currentElevationFactor);
   }
 
   private animate = () => {
@@ -197,31 +318,20 @@ export class TerrainViewer {
     this.renderer.setSize(width, height, false);
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
+    this.updateTrackLineResolution(width, height);
     this.render();
+  }
+
+  private updateTrackLineResolution(width: number, height: number): void {
+    const resolution = new THREE.Vector2(width, height);
+    for (const line of this.trackLines) {
+      const material = line.material as LineMaterial;
+      material.resolution.copy(resolution);
+    }
   }
 
   private yieldFrame(): Promise<void> {
     return new Promise((resolve) => requestAnimationFrame(() => resolve()));
-  }
-
-  private async loadBinary(url: string): Promise<ArrayBuffer> {
-    const response = await fetch(url);
-    if (!response.ok) {
-      throw new Error(`File not found: ${url}`);
-    }
-    return response.arrayBuffer();
-  }
-
-  private async loadTexture(url: string): Promise<THREE.Texture> {
-    const loader = new THREE.TextureLoader();
-    const texture = await loader.loadAsync(url);
-    texture.colorSpace = THREE.SRGBColorSpace;
-    texture.flipY = true;
-    texture.generateMipmaps = true;
-    texture.minFilter = THREE.LinearMipmapLinearFilter;
-    texture.magFilter = THREE.LinearFilter;
-    texture.anisotropy = this.renderer.capabilities.getMaxAnisotropy();
-    return texture;
   }
 
   private createTerrainMaterial(
@@ -256,13 +366,13 @@ export class TerrainViewer {
       snow_surface: null,
     };
 
-    const baseBuf = await this.loadBinary(`${base}/${meta.files.positions}`);
+    const baseBuf = await fetchBinary(`${base}/${meta.files.positions}`);
     models.base = this.extractHeights(new Float32Array(baseBuf));
 
     const snowFile = meta.elevation_models?.snow_surface;
     if (snowFile) {
       try {
-        const snowBuf = await this.loadBinary(`${base}/${snowFile}`);
+        const snowBuf = await fetchBinary(`${base}/${snowFile}`);
         models.snow_surface = this.extractHeights(new Float32Array(snowBuf));
       } catch {
         models.snow_surface = null;
@@ -290,10 +400,121 @@ export class TerrainViewer {
     this.terrainMesh.geometry.computeVertexNormals();
     this.terrainMesh.geometry.computeBoundingBox();
     this.terrainMesh.geometry.computeBoundingSphere();
+    this.updateTrackHeights(factor);
+  }
+
+  private trackHeightsForModel(source: TrackSource): Float32Array {
+    if (this.activeElevationModel === 'snow_surface' && source.snowHeights) {
+      return source.snowHeights;
+    }
+    return source.heights;
+  }
+
+  private trackPointsFromSource(source: TrackSource, factor: number): number[] {
+    const heights = this.trackHeightsForModel(source);
+    const points: number[] = [];
+    for (let vi = 0; vi < heights.length; vi++) {
+      points.push(source.x[vi], heights[vi] * factor, source.z[vi]);
+    }
+    return points;
+  }
+
+  private updateTrackHeights(factor: number): void {
+    for (let ti = 0; ti < this.trackLines.length; ti++) {
+      const source = this.trackSources[ti];
+      if (!source) continue;
+      const line = this.trackLines[ti];
+      line.geometry.setPositions(this.trackPointsFromSource(source, factor));
+      line.computeLineDistances();
+    }
+  }
+
+  private async loadTracks(
+    base: string,
+    meta: SceneMeta,
+    elevationModel: string,
+    factor: number,
+  ): Promise<void> {
+    this.disposeTracks();
+    if (!meta.tracks_file) return;
+
+    const response = await fetch(`${base}/${meta.tracks_file}`);
+    if (!response.ok) return;
+
+    const payload = await response.json();
+    const tracks = payload.tracks || [];
+    if (!Array.isArray(tracks) || tracks.length === 0) return;
+
+    this.activeElevationModel = elevationModel;
+
+    for (const track of tracks) {
+      const raw: number[] | undefined = track.positions;
+      if (!raw || raw.length < 6) continue;
+
+      const pointCount = raw.length / 3;
+      const source: TrackSource = {
+        x: new Float32Array(pointCount),
+        heights: new Float32Array(pointCount),
+        z: new Float32Array(pointCount),
+        snowHeights: null,
+      };
+      for (let vi = 0; vi < pointCount; vi++) {
+        source.x[vi] = raw[vi * 3];
+        source.heights[vi] = raw[vi * 3 + 1];
+        source.z[vi] = raw[vi * 3 + 2];
+      }
+
+      const snowRaw: number[] | undefined = track.snow_positions;
+      if (snowRaw && snowRaw.length >= 6) {
+        const snowCount = snowRaw.length / 3;
+        source.snowHeights = new Float32Array(snowCount);
+        for (let vi = 0; vi < snowCount; vi++) {
+          source.snowHeights[vi] = snowRaw[vi * 3 + 1];
+        }
+      }
+
+      this.trackSources.push(source);
+
+      const geometry = new LineGeometry();
+      geometry.setPositions(this.trackPointsFromSource(source, factor));
+      const material = new LineMaterial({
+        color: 0x2288ff,
+        linewidth: 4,
+        depthTest: true,
+        depthWrite: false,
+        transparent: true,
+        opacity: 0.95,
+        worldUnits: false,
+      });
+      material.resolution.set(
+        Math.max(this.container.clientWidth, 1),
+        Math.max(this.container.clientHeight, 1),
+      );
+
+      const line = new Line2(geometry, material);
+      line.computeLineDistances();
+      line.frustumCulled = false;
+      line.renderOrder = 1;
+      this.scene.add(line);
+      this.trackLines.push(line);
+    }
+  }
+
+  private disposeTracks(): void {
+    for (const line of this.trackLines) {
+      this.scene.remove(line);
+      line.geometry.dispose();
+      (line.material as LineMaterial).dispose();
+    }
+    this.trackLines = [];
+    this.trackSources = [];
   }
 
   private frameCamera(mesh: THREE.Mesh): void {
     const box = new THREE.Box3().setFromObject(mesh);
+    for (const line of this.trackLines) {
+      box.expandByObject(line);
+    }
     const center = new THREE.Vector3();
     const size = new THREE.Vector3();
     box.getCenter(center);
@@ -316,15 +537,26 @@ export class TerrainViewer {
   }
 
   private disposeTerrain(): void {
-    if (!this.terrainMesh) return;
+    this.disposeTracks();
+    if (!this.terrainMesh) {
+      this.heightModels = null;
+      this.sceneMeta = null;
+      this.loadedSceneUrl = null;
+      this.winterTexture = null;
+      this.summerTexture = null;
+      return;
+    }
+
     this.scene.remove(this.terrainMesh);
     this.terrainMesh.geometry.dispose();
-    this.terrainMesh.material.map?.dispose();
     if (this.terrainMesh.material instanceof THREE.Material) {
       this.terrainMesh.material.dispose();
     }
     this.terrainMesh = null;
     this.heightModels = null;
     this.sceneMeta = null;
+    this.loadedSceneUrl = null;
+    this.winterTexture = null;
+    this.summerTexture = null;
   }
 }

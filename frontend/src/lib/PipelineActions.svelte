@@ -208,14 +208,26 @@
       <div class="param-group">
         <label for="resolution-slider">Auflösung (m/px)</label>
         <div class="param-input">
-          <input id="resolution-slider" type="range" bind:value={resolutionM} min="0.1" max="2.0" step="0.05" />
+          <input
+            id="resolution-slider"
+            type="range"
+            value={resolutionM}
+            min="0.1"
+            max="2.0"
+            step="0.05"
+            on:input={(e) => (resolutionM = (e.currentTarget as HTMLInputElement).valueAsNumber)}
+          />
           <span class="param-value">{resolutionM.toFixed(2)} m/px</span>
         </div>
       </div>
 
       <div class="param-group">
         <label for="texture-size">Max. Texturgröße</label>
-        <select id="texture-size" bind:value={maxTextureDim}>
+        <select
+          id="texture-size"
+          value={maxTextureDim}
+          on:change={(e) => (maxTextureDim = Number((e.currentTarget as HTMLSelectElement).value))}
+        >
           <option value="4096">4096 px</option>
           <option value="8192">8192 px</option>
           <option value="16384">16384 px</option>
@@ -225,7 +237,15 @@
       <div class="param-group">
         <label for="mesh-stride">Mesh-Stride</label>
         <div class="param-input">
-          <input id="mesh-stride" type="range" bind:value={meshStride} min="1" max="16" step="1" />
+          <input
+            id="mesh-stride"
+            type="range"
+            value={meshStride}
+            min="1"
+            max="16"
+            step="1"
+            on:input={(e) => (meshStride = (e.currentTarget as HTMLInputElement).valueAsNumber)}
+          />
           <span class="param-value">{meshStride}</span>
         </div>
       </div>

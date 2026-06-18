@@ -20,6 +20,7 @@ from app.schemas import (
     PipelineStatusResponse,
 )
 from app.pipeline_status import get_pipeline_status
+from app.paths import DATA_ROOT, gpx_storage_path, resolve_gpx_path
 
 # DB setup
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./app.db")
@@ -137,22 +138,38 @@ async def upload_gpx(
     db.commit()
     db.refresh(db_track)
 
-    data_root = Path(os.getenv("WINTERMAKER_DATA", str(Path(__file__).resolve().parent.parent / "data")))
-    dest = data_root / "raw" / "gpx" / f"project_{project_id}_{db_track.id}.gpx"
+    data_root = DATA_ROOT
+    dest = gpx_storage_path(project_id, db_track.id)
     dest.parent.mkdir(parents=True, exist_ok=True)
 
     with dest.open("wb") as out:
         shutil.copyfileobj(file.file, out)
 
-    db_track.file_path = str(dest)
+    db_track.file_path = dest.relative_to(data_root).as_posix()
     db.commit()
     db.refresh(db_track)
     return db_track
 
 @router.get("/gpx", response_model=List[GPXTrackResponse])
-def list_gpx(db: Session = Depends(get_db)):
-    tracks = db.execute(select(GPXTrack)).scalars().all()
+def list_gpx(project_id: Optional[int] = None, db: Session = Depends(get_db)):
+    query = select(GPXTrack)
+    if project_id is not None:
+        query = query.where(GPXTrack.project_id == project_id)
+    tracks = db.execute(query).scalars().all()
     return tracks
+
+@router.delete("/gpx/{track_id}")
+def delete_gpx(track_id: int, db: Session = Depends(get_db)):
+    db_track = db.execute(select(GPXTrack).where(GPXTrack.id == track_id)).scalars().first()
+    if not db_track:
+        raise HTTPException(status_code=404, detail="GPX track not found")
+    if db_track.file_path:
+        path = resolve_gpx_path(db_track.file_path)
+        if path is not None:
+            path.unlink()
+    db.delete(db_track)
+    db.commit()
+    return {"message": "GPX track deleted"}
 
 @router.post("/tasks/prepare")
 def prepare_region(request: PrepareRegionRequest):

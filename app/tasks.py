@@ -4,13 +4,17 @@ import subprocess
 import shutil
 import sys
 import logging
+import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from app.celery_app import celery_app
+from app.database import SessionLocal
 from app.models import Project, GPXTrack
+from app.paths import resolve_gpx_path
 from app.schemas import RenderParams
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
@@ -312,6 +316,22 @@ def _as_render_params(params: RenderParams | dict) -> RenderParams:
     return RenderParams(**params)
 
 
+def _get_project_gpx_paths(project_id: int) -> list[str]:
+    db = SessionLocal()
+    try:
+        tracks = db.execute(
+            select(GPXTrack).where(GPXTrack.project_id == project_id)
+        ).scalars().all()
+        paths: list[str] = []
+        for track in tracks:
+            path = resolve_gpx_path(track.file_path or "")
+            if path is not None:
+                paths.append(str(path))
+        return paths
+    finally:
+        db.close()
+
+
 @celery_app.task(bind=True)
 def export_viewer_task(
     self, project_id: int, tile_id: str, config_path: str, params: dict
@@ -323,11 +343,29 @@ def export_viewer_task(
 
     try:
         _, _, _, export_viewer_async = _import_winter_ortho()
+        gpx_paths = _get_project_gpx_paths(project_id)
+        logger.info(
+            "export_viewer: project_id=%s tile_id=%s gpx_files=%s",
+            project_id,
+            resolved_tile_id,
+            len(gpx_paths),
+        )
         result = export_viewer_async(
             tile_id=resolved_tile_id,
             config_path=config_path_obj,
             stride=render_params.stride,
             max_texture_dim=render_params.max_texture_dim,
+            gpx_paths=gpx_paths or None,
+            auto_gpx=not gpx_paths,
+        )
+        track_count = 0
+        scene_path = Path(result.output_dir) / "scene.json"
+        if scene_path.is_file():
+            track_count = int(json.loads(scene_path.read_text()).get("track_count") or 0)
+        logger.info(
+            "export_viewer: project_id=%s tracks_exported=%s",
+            project_id,
+            track_count,
         )
         return {
             "status": "success",
@@ -335,6 +373,8 @@ def export_viewer_task(
             "viewer_dir": str(result.output_dir),
             "tile_id": resolved_tile_id,
             "scene_url": f"/viewer/data/{resolved_tile_id}/scene.json",
+            "track_count": track_count,
+            "gpx_files": len(gpx_paths),
             "result": {
                 "vertex_count": result.vertex_count,
                 "triangle_count": result.triangle_count,
@@ -342,6 +382,7 @@ def export_viewer_task(
                 "texture_width": result.texture_width,
                 "texture_height": result.texture_height,
                 "max_texture_dim": result.max_texture_dim,
+                "track_count": track_count,
             },
         }
     except Exception as e:
