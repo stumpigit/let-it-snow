@@ -14,6 +14,12 @@ from app.database import SessionLocal
 from app.models import Project, GPXTrack
 from app.paths import resolve_gpx_path
 from app.schemas import RenderParams
+from app.rendering_profiles import (
+    DEFAULT_BASE_PROFILE,
+    normalize_region_name,
+    resolve_pipeline_profile,
+    run_in_project_workdir,
+)
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -139,11 +145,24 @@ def prepare_region_task(
         return {"status": "failed", "message": str(e)}
 
 
+def _winter_profile_for_project(project_id: int, profile: str) -> str:
+    db = SessionLocal()
+    try:
+        project = db.execute(select(Project).where(Project.id == project_id)).scalars().first()
+        if not project:
+            return profile if profile in (DEFAULT_BASE_PROFILE,) else DEFAULT_BASE_PROFILE
+        region_name = normalize_region_name(project.name)
+        return resolve_pipeline_profile(project_id, region_name, profile)
+    finally:
+        db.close()
+
+
 @celery_app.task(bind=True)
 def run_pipeline_task(
     self, project_id: int, tile_id: str, profile: str, config_path: str
 ) -> Dict[str, Any]:
     """Run the full pipeline: harmonize, masks, terrain, snow, render, qa."""
+    winter_profile = _winter_profile_for_project(project_id, profile)
     resolved_tile_id = normalize_tile_id(tile_id, config_path)
     config_path_obj = _resolve_config_path(config_path, resolved_tile_id)
     started_at = datetime.utcnow().isoformat() + "Z"
@@ -168,7 +187,7 @@ def run_pipeline_task(
             "steps": steps,
             "project_id": project_id,
             "tile_id": resolved_tile_id,
-            "profile": profile,
+            "profile": winter_profile,
             "config_path": config_path_obj,
             "started_at": started_at,
             "updated_at": datetime.utcnow().isoformat() + "Z",
@@ -200,7 +219,7 @@ def run_pipeline_task(
                 "steps": steps,
                 "project_id": project_id,
                 "tile_id": resolved_tile_id,
-                "profile": profile,
+                "profile": winter_profile,
                 "config_path": config_path_obj,
                 "started_at": started_at,
                 "updated_at": datetime.utcnow().isoformat() + "Z",
@@ -209,12 +228,16 @@ def run_pipeline_task(
 
     try:
         run_all_async, _, _, _ = _import_winter_ortho()
-        result = run_all_async(
-            tile_id=resolved_tile_id,
-            profile_name=profile,
-            config_path=config_path_obj,
-            on_step=on_step,
-        )
+
+        def _run():
+            return run_all_async(
+                tile_id=resolved_tile_id,
+                profile_name=winter_profile,
+                config_path=config_path_obj,
+                on_step=on_step,
+            )
+
+        result = run_in_project_workdir(project_id, _run)
         return {
             "status": "success",
             "message": "Pipeline completed successfully",
@@ -231,6 +254,7 @@ def run_snow_pipeline_task(
     self, project_id: int, tile_id: str, profile: str, config_path: str
 ) -> Dict[str, Any]:
     """Run only snow + render pipeline (assuming harmonize/masks/terrain are done)."""
+    winter_profile = _winter_profile_for_project(project_id, profile)
     resolved_tile_id = normalize_tile_id(tile_id, config_path)
     config_path_obj = _resolve_config_path(config_path, resolved_tile_id)
     started_at = datetime.utcnow().isoformat() + "Z"
@@ -252,7 +276,7 @@ def run_snow_pipeline_task(
             "steps": steps,
             "project_id": project_id,
             "tile_id": resolved_tile_id,
-            "profile": profile,
+            "profile": winter_profile,
             "config_path": config_path_obj,
             "started_at": started_at,
             "updated_at": datetime.utcnow().isoformat() + "Z",
@@ -284,7 +308,7 @@ def run_snow_pipeline_task(
                 "steps": steps,
                 "project_id": project_id,
                 "tile_id": resolved_tile_id,
-                "profile": profile,
+                "profile": winter_profile,
                 "config_path": config_path_obj,
                 "started_at": started_at,
                 "updated_at": datetime.utcnow().isoformat() + "Z",
@@ -293,12 +317,16 @@ def run_snow_pipeline_task(
 
     try:
         _, run_snow_async, _, _ = _import_winter_ortho()
-        result = run_snow_async(
-            tile_id=resolved_tile_id,
-            profile_name=profile,
-            config_path=config_path_obj,
-            on_step=on_step,
-        )
+
+        def _run():
+            return run_snow_async(
+                tile_id=resolved_tile_id,
+                profile_name=winter_profile,
+                config_path=config_path_obj,
+                on_step=on_step,
+            )
+
+        result = run_in_project_workdir(project_id, _run)
         return {
             "status": "success",
             "message": "Snow pipeline completed successfully",

@@ -70,10 +70,14 @@
   let elevationModel = $state<'snow_surface' | 'base'>('snow_surface');
   let pipelineProgress = $state<PipelineProgress>(emptyProgress());
   let renderProfile = $state('default');
+  let winterProfileName = $state('default');
+  let profileCustom = $state(false);
   let resolutionM = $state(RENDER_PROFILE_PRESETS.default.resolutionM);
   let maxTextureDim = $state(RENDER_PROFILE_PRESETS.default.maxTextureDim);
   let meshStride = $state(RENDER_PROFILE_PRESETS.default.meshStride);
   let sceneRevision = $state(0);
+  let pipelineActions: PipelineActions | undefined = $state();
+  let chainingViewerExport = $state(false);
 
   // --- Helpers ---
   function regionSlug(name: string): string {
@@ -114,11 +118,19 @@
     tile_id?: string;
     config_path?: string | null;
     scene_url?: string | null;
+    rendering_profile_name?: string | null;
+    rendering_profile_custom?: boolean;
     progress?: Partial<PipelineProgress>;
   }) {
     if (typeof status.tile_id === 'string') tileId = status.tile_id;
     if (typeof status.config_path === 'string') configPath = status.config_path;
     if (typeof status.scene_url === 'string') sceneUrl = buildSceneUrl(status.tile_id);
+    if (typeof status.rendering_profile_name === 'string') {
+      winterProfileName = status.rendering_profile_name;
+    }
+    if (typeof status.rendering_profile_custom === 'boolean') {
+      profileCustom = status.rendering_profile_custom;
+    }
     if (status.progress) {
       pipelineProgress = { ...emptyProgress(), ...status.progress };
     }
@@ -135,6 +147,8 @@
     sceneUrl = '';
     activeTab = 'pipeline';
     pipelineProgress = emptyProgress();
+    winterProfileName = 'default';
+    profileCustom = false;
     view = 'project';
 
     try {
@@ -181,21 +195,23 @@
 
   async function handleRunPipeline() {
     if (!selectedProject || pipelineRunning) return;
+    await pipelineActions?.flushProfileSave();
     await startTask(`${apiUrl}/tasks/run-pipeline`, {
       project_id: selectedProject.id,
       tile_id: tileId,
       config_path: configPath,
-      profile: renderProfile,
+      profile: winterProfileName,
     });
   }
 
   async function handleRunSnowPipeline() {
     if (!selectedProject || pipelineRunning) return;
+    await pipelineActions?.flushProfileSave();
     await startTask(`${apiUrl}/tasks/run-snow`, {
       project_id: selectedProject.id,
       tile_id: tileId,
       config_path: configPath,
-      profile: renderProfile,
+      profile: winterProfileName,
     });
   }
 
@@ -240,6 +256,37 @@
           // Keep partial updates from the task result below.
         }
       }
+
+      for (const [stage, pct] of Object.entries(result)) {
+        if (typeof pct === 'number' && stage in pipelineProgress) {
+          pipelineProgress = { ...pipelineProgress, [stage]: pct };
+        }
+      }
+
+      const resultMessage = typeof result.message === 'string' ? result.message : '';
+      const pipelineDone =
+        resultMessage === 'Snow pipeline completed successfully' ||
+        resultMessage === 'Pipeline completed successfully';
+
+      if (pipelineDone && selectedProject && !chainingViewerExport) {
+        chainingViewerExport = true;
+        try {
+          await startTask(`${apiUrl}/tasks/export-viewer`, {
+            project_id: selectedProject.id,
+            tile_id: tileId,
+            config_path: configPath,
+            params: {
+              profile: renderProfile,
+              resolution_m: resolutionM,
+              max_texture_dim: Number(maxTextureDim),
+              stride: meshStride,
+            },
+          });
+        } finally {
+          chainingViewerExport = false;
+        }
+      }
+      return;
     } else if (event.detail.status === 'FAILURE') {
       pipelineRunning = false;
     }
@@ -416,13 +463,17 @@
           {#if activeTab === 'pipeline'}
             <!-- Pipeline tab -->
             <PipelineActions
+              bind:this={pipelineActions}
               project={selectedProject!}
+              {apiUrl}
               pipelineProgress={pipelineProgress}
               pipelineRunning={pipelineRunning}
               canRunFullPipeline={canRunFullPipeline}
               canRunSnowPipeline={canRunSnowPipeline}
               canExportViewer={canExportViewer}
               bind:renderProfile
+              bind:winterProfileName
+              bind:profileCustom
               bind:resolutionM
               bind:maxTextureDim
               bind:meshStride

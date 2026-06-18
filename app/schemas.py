@@ -1,6 +1,6 @@
 from pydantic import BaseModel
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Any
 
 
 class ProjectCreate(BaseModel):
@@ -78,3 +78,19 @@ class PipelineStatusResponse(BaseModel):
     config_path: Optional[str] = None
     progress: dict[str, int]
     scene_url: Optional[str] = None
+    rendering_profile_name: Optional[str] = None
+    rendering_profile_custom: bool = False
+
+
+class RenderingProfileFieldUpdate(BaseModel):
+    path: str
+    value: Any
+
+
+class RenderingProfileUpdateRequest(BaseModel):
+    base_profile: str = "default"
+    changes: List[RenderingProfileFieldUpdate]
+
+
+class RenderingProfileResetRequest(BaseModel):
+    base_profile: str = "default"

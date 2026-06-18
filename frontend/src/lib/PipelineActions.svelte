@@ -1,6 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
   import Icon from './Icon.svelte';
+  import RenderProfileExpert from './RenderProfileExpert.svelte';
   import { applyRenderProfilePreset, RENDER_PROFILE_PRESETS } from './renderProfiles';
 
   export interface PipelineProject {
@@ -14,6 +15,7 @@
 
   let {
     project,
+    apiUrl = 'http://localhost:8000',
     pipelineProgress = {
       prepare: 0,
       harmonize: 0,
@@ -29,17 +31,22 @@
     canRunSnowPipeline = false,
     canExportViewer = false,
     renderProfile = $bindable('default'),
+    winterProfileName = $bindable('default'),
+    profileCustom = $bindable(false),
     resolutionM = $bindable(RENDER_PROFILE_PRESETS.default.resolutionM),
     maxTextureDim = $bindable(RENDER_PROFILE_PRESETS.default.maxTextureDim),
     meshStride = $bindable(RENDER_PROFILE_PRESETS.default.meshStride),
   }: {
     project: PipelineProject;
+    apiUrl?: string;
     pipelineProgress?: PipelineProgress;
     pipelineRunning?: boolean;
     canRunFullPipeline?: boolean;
     canRunSnowPipeline?: boolean;
     canExportViewer?: boolean;
     renderProfile?: string;
+    winterProfileName?: string;
+    profileCustom?: boolean;
     resolutionM?: number;
     maxTextureDim?: number;
     meshStride?: number;
@@ -51,6 +58,12 @@
     'snow-pipeline': void;
     'export-viewer': void;
   }>();
+
+  let profileExpert: RenderProfileExpert;
+
+  export async function flushProfileSave(): Promise<void> {
+    await profileExpert?.flushPendingSave();
+  }
 
   const stages: Array<{ key: string; name: string; icon: string }> = [
     { key: 'prepare', name: 'Vorbereitung', icon: 'check-circle' },
@@ -202,13 +215,13 @@
 
   <section class="params-section">
     <div class="section-title-row">
-      <h3>Rendering-Parameter</h3>
-      <span class="section-note">Gelten für Pipeline und Viewer-Export</span>
+      <h3>Viewer-Parameter</h3>
+      <span class="section-note">Gelten für 3D-Viewer-Export</span>
     </div>
 
     <div class="params-grid">
       <div class="param-group">
-        <label for="render-profile">Profil</label>
+        <label for="render-profile">Viewer-Qualität</label>
         <select id="render-profile" value={renderProfile} on:change={handleProfileChange}>
           <option value="default">Standard</option>
           <option value="high">Hoch</option>
@@ -257,6 +270,14 @@
         </div>
       </div>
     </div>
+
+    <RenderProfileExpert
+      bind:this={profileExpert}
+      projectId={project.id}
+      {apiUrl}
+      bind:winterProfileName
+      bind:profileCustom
+    />
   </section>
 </div>
 
@@ -531,6 +552,12 @@
     color: #94a3b8;
     margin-top: 0.2rem;
     flex-shrink: 0;
+  }
+
+  .params-section {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
   }
 
   .params-grid {

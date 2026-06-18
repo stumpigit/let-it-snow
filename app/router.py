@@ -18,9 +18,22 @@ from app.schemas import (
     PipelineRequest,
     ExportViewerRequest,
     PipelineStatusResponse,
+    RenderingProfileUpdateRequest,
+    RenderingProfileResetRequest,
 )
 from app.pipeline_status import get_pipeline_status
 from app.paths import DATA_ROOT, gpx_storage_path, resolve_gpx_path
+from app.rendering_profiles import (
+    DEFAULT_BASE_PROFILE,
+    delete_project_profile,
+    has_custom_profile,
+    list_base_profiles,
+    normalize_region_name,
+    parse_rendering_profile_docs,
+    profile_response_for_project,
+    resolve_pipeline_profile,
+    save_project_profile,
+)
 
 # DB setup
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./app.db")
@@ -101,7 +114,70 @@ def project_pipeline_status(project_id: int, db: Session = Depends(get_db)):
     db_project = db.execute(select(Project).where(Project.id == project_id)).scalars().first()
     if not db_project:
         raise HTTPException(status_code=404, detail="Project not found")
-    return get_pipeline_status(db_project.name)
+    status = get_pipeline_status(db_project.name)
+    region_name = normalize_region_name(db_project.name)
+    profile_name = resolve_pipeline_profile(project_id, region_name, DEFAULT_BASE_PROFILE)
+    status["rendering_profile_name"] = profile_name
+    status["rendering_profile_custom"] = has_custom_profile(project_id, region_name)
+    return status
+
+
+@router.get("/rendering-profiles/templates")
+def rendering_profile_templates():
+    return {"profiles": list_base_profiles(), "default": DEFAULT_BASE_PROFILE}
+
+
+@router.get("/rendering-profiles/docs")
+def rendering_profile_docs():
+    return parse_rendering_profile_docs()
+
+
+@router.get("/projects/{project_id}/rendering-profile")
+def get_project_rendering_profile(
+    project_id: int,
+    base_profile: str = DEFAULT_BASE_PROFILE,
+    db: Session = Depends(get_db),
+):
+    db_project = db.execute(select(Project).where(Project.id == project_id)).scalars().first()
+    if not db_project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    region_name = normalize_region_name(db_project.name)
+    if base_profile not in list_base_profiles():
+        raise HTTPException(status_code=400, detail=f"Unknown base profile: {base_profile}")
+    return profile_response_for_project(project_id, region_name, base_profile)
+
+
+@router.put("/projects/{project_id}/rendering-profile")
+def update_project_rendering_profile(
+    project_id: int,
+    body: RenderingProfileUpdateRequest,
+    db: Session = Depends(get_db),
+):
+    db_project = db.execute(select(Project).where(Project.id == project_id)).scalars().first()
+    if not db_project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if body.base_profile not in list_base_profiles():
+        raise HTTPException(status_code=400, detail=f"Unknown base profile: {body.base_profile}")
+    region_name = normalize_region_name(db_project.name)
+    changes = {item.path: item.value for item in body.changes}
+    if not changes:
+        raise HTTPException(status_code=400, detail="No changes provided")
+    save_project_profile(project_id, region_name, body.base_profile, changes)
+    return profile_response_for_project(project_id, region_name, body.base_profile)
+
+
+@router.post("/projects/{project_id}/rendering-profile/reset")
+def reset_project_rendering_profile(
+    project_id: int,
+    body: RenderingProfileResetRequest,
+    db: Session = Depends(get_db),
+):
+    db_project = db.execute(select(Project).where(Project.id == project_id)).scalars().first()
+    if not db_project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    region_name = normalize_region_name(db_project.name)
+    delete_project_profile(project_id, region_name)
+    return profile_response_for_project(project_id, region_name, body.base_profile)
 
 
 @router.delete("/projects/{project_id}")

@@ -60,6 +60,12 @@
   {#if name === 'chevron-right'}
     <polyline points="9 18 15 12 9 6" />
   {/if}
+  {#if name === 'chevron-down'}
+    <polyline points="6 9 12 15 18 9" />
+  {/if}
+  {#if name === 'chevron-up'}
+    <polyline points="18 15 12 9 6 15" />
+  {/if}
   {#if name === 'menu'}
     <line x1="3" y1="12" x2="21" y2="12" />
     <line x1="3" y1="6" x2="21" y2="6" />

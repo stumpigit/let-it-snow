@@ -38,6 +38,21 @@ export type ViewerLoadOptions = {
 const binaryCache = new Map<string, Promise<ArrayBuffer>>();
 const textureCache = new Map<string, Promise<THREE.Texture>>();
 
+function clearAssetCaches(): void {
+  binaryCache.clear();
+  textureCache.clear();
+}
+
+function cacheBustFromSceneUrl(sceneUrl: string): string | null {
+  const match = sceneUrl.match(/[?&]v=([^&]+)/);
+  return match ? match[1] : null;
+}
+
+function assetUrl(base: string, file: string, sceneUrl: string): string {
+  const revision = cacheBustFromSceneUrl(sceneUrl);
+  return revision ? `${base}/${file}?v=${revision}` : `${base}/${file}`;
+}
+
 function fetchBinary(url: string): Promise<ArrayBuffer> {
   let cached = binaryCache.get(url);
   if (!cached) {
@@ -146,6 +161,7 @@ export class TerrainViewer {
       return this.updateOptions(options);
     }
 
+    clearAssetCaches();
     this.disposeTerrain();
     const report = options.onProgress;
     const step = (label: string, progress: number) => report?.(label, progress);
@@ -167,29 +183,35 @@ export class TerrainViewer {
     this.activeElevationModel =
       requestedModel === 'snow_surface' && this.sceneMeta.has_snow_surface ? 'snow_surface' : 'base';
 
-    const positionsBuf = await fetchBinary(`${base}/${this.sceneMeta.files.positions}`);
+    const positionsBuf = await fetchBinary(assetUrl(base, this.sceneMeta.files.positions, sceneUrl));
     step('Lade Vertex-Positionen…', 0.22);
 
-    const uvsBuf = await fetchBinary(`${base}/${this.sceneMeta.files.uvs}`);
+    const uvsBuf = await fetchBinary(assetUrl(base, this.sceneMeta.files.uvs, sceneUrl));
     step('Lade Texturkoordinaten…', 0.32);
 
-    const indicesBuf = await fetchBinary(`${base}/${this.sceneMeta.files.indices}`);
+    const indicesBuf = await fetchBinary(assetUrl(base, this.sceneMeta.files.indices, sceneUrl));
     step('Lade Mesh-Indizes…', 0.42);
 
-    this.winterTexture = await fetchTexture(`${base}/${this.sceneMeta.textures.winter}`, this.renderer);
+    this.winterTexture = await fetchTexture(
+      assetUrl(base, this.sceneMeta.textures.winter, sceneUrl),
+      this.renderer,
+    );
     step('Lade Winter-Orthofoto…', 0.58);
 
     this.summerTexture = null;
     if (this.sceneMeta.textures.summer) {
       try {
-        this.summerTexture = await fetchTexture(`${base}/${this.sceneMeta.textures.summer}`, this.renderer);
+        this.summerTexture = await fetchTexture(
+          assetUrl(base, this.sceneMeta.textures.summer, sceneUrl),
+          this.renderer,
+        );
         step('Lade Sommer-Orthofoto…', 0.68);
       } catch {
         this.summerTexture = null;
       }
     }
 
-    this.heightModels = await this.loadElevationModels(base, this.sceneMeta);
+    this.heightModels = await this.loadElevationModels(base, this.sceneMeta, sceneUrl);
     step('Lade Höhenmodelle…', 0.82);
     await this.yieldFrame();
     step('Erzeuge 3D-Mesh…', 0.9);
@@ -226,7 +248,7 @@ export class TerrainViewer {
     this.applyExaggeration(this.currentElevationFactor);
 
     step('Lade GPX-Tracks…', 0.94);
-    await this.loadTracks(base, this.sceneMeta, this.activeElevationModel, this.currentElevationFactor);
+    await this.loadTracks(base, this.sceneMeta, this.activeElevationModel, this.currentElevationFactor, sceneUrl);
     this.frameCamera(this.terrainMesh);
     step('Szene geladen', 1);
 
@@ -360,19 +382,20 @@ export class TerrainViewer {
   private async loadElevationModels(
     base: string,
     meta: SceneMeta,
+    sceneUrl: string,
   ): Promise<Record<string, Float32Array | null>> {
     const models: Record<string, Float32Array | null> = {
       base: null,
       snow_surface: null,
     };
 
-    const baseBuf = await fetchBinary(`${base}/${meta.files.positions}`);
+    const baseBuf = await fetchBinary(assetUrl(base, meta.files.positions, sceneUrl));
     models.base = this.extractHeights(new Float32Array(baseBuf));
 
     const snowFile = meta.elevation_models?.snow_surface;
     if (snowFile) {
       try {
-        const snowBuf = await fetchBinary(`${base}/${snowFile}`);
+        const snowBuf = await fetchBinary(assetUrl(base, snowFile, sceneUrl));
         models.snow_surface = this.extractHeights(new Float32Array(snowBuf));
       } catch {
         models.snow_surface = null;
@@ -434,11 +457,12 @@ export class TerrainViewer {
     meta: SceneMeta,
     elevationModel: string,
     factor: number,
+    sceneUrl: string,
   ): Promise<void> {
     this.disposeTracks();
     if (!meta.tracks_file) return;
 
-    const response = await fetch(`${base}/${meta.tracks_file}`);
+    const response = await fetch(assetUrl(base, meta.tracks_file, sceneUrl));
     if (!response.ok) return;
 
     const payload = await response.json();
