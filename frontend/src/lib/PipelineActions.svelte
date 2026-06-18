@@ -1,6 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
   import Icon from './Icon.svelte';
+  import { applyRenderProfilePreset, RENDER_PROFILE_PRESETS } from './renderProfiles';
 
   export interface PipelineProject {
     id: number;
@@ -28,9 +29,9 @@
     canRunSnowPipeline = false,
     canExportViewer = false,
     renderProfile = $bindable('default'),
-    resolutionM = $bindable(0.5),
-    maxTextureDim = $bindable(8192),
-    meshStride = $bindable(2),
+    resolutionM = $bindable(RENDER_PROFILE_PRESETS.default.resolutionM),
+    maxTextureDim = $bindable(RENDER_PROFILE_PRESETS.default.maxTextureDim),
+    meshStride = $bindable(RENDER_PROFILE_PRESETS.default.meshStride),
   }: {
     project: PipelineProject;
     pipelineProgress?: PipelineProgress;
@@ -119,6 +120,16 @@
   function handleAction(actionId: string) {
     dispatch(actionId as 'prepare' | 'full-pipeline' | 'snow-pipeline' | 'export-viewer');
   }
+
+  function handleProfileChange(event: Event) {
+    const profile = (event.currentTarget as HTMLSelectElement).value;
+    renderProfile = profile;
+    const preset = applyRenderProfilePreset(profile);
+    if (!preset) return;
+    resolutionM = preset.resolutionM;
+    maxTextureDim = preset.maxTextureDim;
+    meshStride = preset.meshStride;
+  }
 </script>
 
 <div class="workflow-shell">
@@ -198,7 +209,7 @@
     <div class="params-grid">
       <div class="param-group">
         <label for="render-profile">Profil</label>
-        <select id="render-profile" bind:value={renderProfile}>
+        <select id="render-profile" value={renderProfile} on:change={handleProfileChange}>
           <option value="default">Standard</option>
           <option value="high">Hoch</option>
           <option value="ultra">Ultra</option>
@@ -223,14 +234,10 @@
 
       <div class="param-group">
         <label for="texture-size">Max. Texturgröße</label>
-        <select
-          id="texture-size"
-          value={maxTextureDim}
-          on:change={(e) => (maxTextureDim = Number((e.currentTarget as HTMLSelectElement).value))}
-        >
-          <option value="4096">4096 px</option>
-          <option value="8192">8192 px</option>
-          <option value="16384">16384 px</option>
+        <select id="texture-size" bind:value={maxTextureDim}>
+          <option value={4096}>4096 px</option>
+          <option value={8192}>8192 px</option>
+          <option value={16384}>16384 px</option>
         </select>
       </div>
 

@@ -7,6 +7,7 @@
   import PipelineActions from './lib/PipelineActions.svelte';
   import ProjectNewModal from './lib/ProjectNewModal.svelte';
   import Icon from './lib/Icon.svelte';
+  import { RENDER_PROFILE_PRESETS } from './lib/renderProfiles';
 
   type Project = { id: number; name: string; description?: string; bbox: number[]; created_at?: string };
 
@@ -69,9 +70,9 @@
   let elevationModel = $state<'snow_surface' | 'base'>('snow_surface');
   let pipelineProgress = $state<PipelineProgress>(emptyProgress());
   let renderProfile = $state('default');
-  let resolutionM = $state(0.5);
-  let maxTextureDim = $state(8192);
-  let meshStride = $state(2);
+  let resolutionM = $state(RENDER_PROFILE_PRESETS.default.resolutionM);
+  let maxTextureDim = $state(RENDER_PROFILE_PRESETS.default.maxTextureDim);
+  let meshStride = $state(RENDER_PROFILE_PRESETS.default.meshStride);
   let sceneRevision = $state(0);
 
   // --- Helpers ---
