@@ -1,47 +1,54 @@
 <script lang="ts">
   import ProjectList from './lib/ProjectList.svelte';
-  import ProjectForm from './lib/ProjectForm.svelte';
   import GPXUpload from './lib/GPXUpload.svelte';
-  import RenderingControls from './lib/RenderingControls.svelte';
   import TaskProgress from './lib/TaskProgress.svelte';
   import ThreeViewer from './lib/ThreeViewer.svelte';
+  import PipelineActions from './lib/PipelineActions.svelte';
+  import ProjectNewModal from './lib/ProjectNewModal.svelte';
   import Icon from './lib/Icon.svelte';
 
-  type Project = {
-    id: number;
-    name: string;
-    description?: string;
-    bbox: number[];
-  };
+  type Project = { id: number; name: string; description?: string; bbox: number[]; created_at?: string };
 
-  const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+  const apiUrl = (import.meta as any).env?.VITE_API_URL || 'http://localhost:8000';
 
-  let listKey = 0;
+  // --- State ---
   let selectedProject: Project | null = null;
-  let taskId: string | null = null;
+  let view = 'home' as 'home' | 'project'; // home = no project, project = selected
+  let activeTab = 'pipeline' as 'pipeline' | 'viewer';
+  let sidebarOpen = true;
+  let showNewProject = false;
   let actionError: string | null = null;
+  let projectListVersion = 0;
+
+  // Per-project runtime state
   let tileId = '';
   let configPath = '';
   let sceneUrl = '';
+  let taskId: string | null = null;
+  let taskModalOpen = false;
+  let pipelineRunning = false;
+  let currentStage = '';
   let textureMode: 'winter' | 'summer' = 'winter';
   let elevationModel: 'snow_surface' | 'base' = 'snow_surface';
-  let renderParams = {
-    profile: 'default',
-    resolutionM: 0.5,
-    maxTextureDim: 8192,
-    stride: 2,
+
+  // Pipeline progress state
+  let pipelineProgress = {
+    prepare: 0,
+    harmonize: 0,
+    masks: 0,
+    terrain: 0,
+    snow: 0,
+    render: 0,
+    qa: 0,
+    viewer: 0,
   };
 
-  // Tab state
-  let activeTab = 'processing';
+  // --- Helpers ---
+  function regionSlug(name: string): string {
+    return name.toLowerCase().replace(/[^a-z0-9_-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+  }
 
-  // Sidebar state
-  let sidebarOpen = true;
-  let taskModalOpen = false;
-
-  async function handleCreateProject(
-    event: CustomEvent<{ name: string; description: string; bbox: number[] }>,
-  ) {
+  async function handleCreateProject(event: CustomEvent<{ name: string; description: string; bbox: number[] }>) {
     actionError = null;
     try {
       const res = await fetch(`${apiUrl}/projects`, {
@@ -50,61 +57,43 @@
         body: JSON.stringify(event.detail),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      listKey += 1;
-    } catch (e: any) {
-      actionError = e.message;
-    }
+      showNewProject = false;
+      projectListVersion += 1;
+      // Refresh project list and auto-select
+      const listRes = await fetch(`${apiUrl}/projects`);
+      if (!listRes.ok) throw new Error(`HTTP ${listRes.status}`);
+      const projects: Project[] = await listRes.json();
+      const last = projects[projects.length - 1];
+      if (last) {
+        selectedProject = last;
+        view = 'project';
+        handleSelectProject(last);
+      }
+    } catch (e: any) { actionError = e.message; }
   }
 
-  function regionSlug(name: string): string {
-    return name
-      .toLowerCase()
-      .replace(/[^a-z0-9_-]/g, '-')
-      .replace(/-+/g, '-')
-      .replace(/^-|-$/g, '');
-  }
-
-  function handleSelectProject(event: CustomEvent<Project>) {
-    selectedProject = event.detail;
-    tileId = `${regionSlug(event.detail.name)}_001`;
+  function handleSelectProject(project: Project) {
+    selectedProject = project;
+    tileId = `${regionSlug(project.name)}_001`;
     actionError = null;
     taskId = null;
     configPath = '';
     sceneUrl = '';
+    activeTab = 'pipeline';
+    pipelineProgress = { prepare: 0, harmonize: 0, masks: 0, terrain: 0, snow: 0, render: 0, qa: 0, viewer: 0 };
+    view = 'project';
   }
 
-  function handleTaskComplete(event: CustomEvent<{ status: string; progress?: Record<string, unknown> }>) {
-    const result = event.detail.progress;
-    if (!result || event.detail.status !== 'SUCCESS') return;
-    if (typeof result.config_path === 'string') configPath = result.config_path;
-    if (typeof result.tile_id === 'string') tileId = result.tile_id;
-    if (typeof result.scene_url === 'string') {
-      sceneUrl = `${apiUrl}${result.scene_url}`;
-    } else if (typeof result.tile_id === 'string') {
-      sceneUrl = `${apiUrl}/viewer/data/${result.tile_id}/scene.json`;
-    }
-  }
-
-  function handleRenderApply(
-    event: CustomEvent<{
-      profile: string;
-      resolutionM: number;
-      maxTextureDim: number;
-      stride: number;
-    }>,
-  ) {
-    renderParams = event.detail;
-  }
-
-  async function startTask(url: string, body?: Record<string, unknown>) {
+  // --- Pipeline actions ---
+  async function startTask(url: string, body: Record<string, unknown>) {
     actionError = null;
     taskId = null;
-    taskModalOpen = false;
+    pipelineRunning = true;
     try {
       const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: body ? JSON.stringify(body) : undefined,
+        body: JSON.stringify(body),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
@@ -112,301 +101,329 @@
       taskModalOpen = true;
     } catch (e: any) {
       actionError = e.message;
+      pipelineRunning = false;
     }
   }
 
-  function dismissTaskModal() {
-    taskModalOpen = false;
-  }
-
   async function handlePrepareRegion() {
-    if (!selectedProject) return;
-    const { id, name, bbox } = selectedProject;
+    if (!selectedProject || pipelineRunning) return;
     await startTask(`${apiUrl}/tasks/prepare`, {
-      project_id: id,
-      name,
-      bbox,
+      project_id: selectedProject.id,
+      name: selectedProject.name,
+      bbox: selectedProject.bbox,
     });
   }
 
   async function handleRunPipeline() {
-    if (!selectedProject) return;
+    if (!selectedProject || pipelineRunning) return;
     await startTask(`${apiUrl}/tasks/run-pipeline`, {
       project_id: selectedProject.id,
       tile_id: tileId,
-      profile: renderParams.profile,
       config_path: configPath,
     });
   }
 
   async function handleRunSnowPipeline() {
-    if (!selectedProject) return;
+    if (!selectedProject || pipelineRunning) return;
     await startTask(`${apiUrl}/tasks/run-snow`, {
       project_id: selectedProject.id,
       tile_id: tileId,
-      profile: renderParams.profile,
       config_path: configPath,
     });
   }
 
   async function handleExportViewer() {
-    if (!selectedProject) return;
+    if (!selectedProject || pipelineRunning) return;
     await startTask(`${apiUrl}/tasks/export-viewer`, {
       project_id: selectedProject.id,
       tile_id: tileId,
       config_path: configPath,
-      params: {
-        profile: renderParams.profile,
-        resolution_m: renderParams.resolutionM,
-        max_texture_dim: renderParams.maxTextureDim,
-        stride: renderParams.stride,
-      },
     });
   }
+
+  function handleTaskComplete(event: CustomEvent<{ status: string; progress?: Record<string, unknown> }>) {
+    const result = event.detail.progress;
+    if (!result) return;
+    pipelineRunning = event.detail.status === 'RUNNING';
+    if (event.detail.status === 'SUCCESS') {
+      if (typeof result.config_path === 'string') configPath = result.config_path;
+      if (typeof result.tile_id === 'string') tileId = result.tile_id;
+      if (typeof result.scene_url === 'string') sceneUrl = `${apiUrl}${result.scene_url}`;
+    }
+    // Update stage progress
+    for (const [stage, pct] of Object.entries(result)) {
+      if (typeof pct === 'number' && stage in pipelineProgress) {
+        pipelineProgress = { ...pipelineProgress, [stage]: pct };
+      }
+    }
+    if (event.detail.status === 'SUCCESS') {
+      currentStage = '';
+      // Set all completed stages to 100
+      const completedStages = ['prepare', 'harmonize', 'masks', 'terrain', 'snow', 'render', 'qa', 'viewer'];
+      for (const s of completedStages) {
+        pipelineProgress = { ...pipelineProgress, [s]: 100 };
+      }
+    }
+  }
+
+  function toggleSidebar() { sidebarOpen = !sidebarOpen; }
+  function loadScene() { if (tileId) sceneUrl = `${apiUrl}/viewer/data/${tileId}/scene.json`; }
+  function dismissTaskModal() { taskModalOpen = false; }
+  function resetToHome() {
+    view = 'home';
+    selectedProject = null;
+    taskModalOpen = false;
+    taskId = null;
+    sceneUrl = '';
+    actionError = null;
+  }
+
+  $: hasPreparedProject = !!configPath || pipelineProgress.prepare > 0;
+  $: hasViewerData = !!sceneUrl || pipelineProgress.viewer > 0;
 </script>
 
 <div class="app">
+  <!-- Header -->
   <header class="app-header">
-    <div class="header-content">
-      <button
-        class="sidebar-toggle"
-        on:click={() => (sidebarOpen = !sidebarOpen)}
-        title={sidebarOpen ? 'Sidebar ausblenden' : 'Sidebar anzeigen'}
-      >
-        <Icon name={sidebarOpen ? 'menu' : 'menu'} size={20} />
+    <div class="header-left">
+      <button class="sidebar-toggle" on:click={toggleSidebar} aria-label="Sidebar umschalten">
+        <Icon name="menu" size={22} />
       </button>
-      <div class="logo">
-        <Icon name="snow" size={32} className="logo-icon" />
+      <button class="logo" type="button" on:click={resetToHome} aria-label="Zur Startseite wechseln">
+        <svg class="logo-icon" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 2v20M2 12h20M4.93 4.93l14.14 14.14M19.07 4.93L4.93 19.07" stroke-dasharray="2 2" />
+        </svg>
         <div>
           <h1>Let It Snow</h1>
-          <p>3D-Orthophoto-Renderer</p>
+          <p>3D-Orthophoto Renderer</p>
         </div>
-      </div>
-    </div>
-    <div class="user-menu">
-      <button class="btn-icon" title="Hilfe">
-        <Icon name="alert" size={20} />
       </button>
+    </div>
+    <div class="header-right">
+      {#if selectedProject}
+        <div class="project-badge">
+          <span class="badge-name">{selectedProject.name}</span>
+          {#if pipelineRunning}
+            <span class="badge-running">●</span>
+          {/if}
+        </div>
+      {/if}
     </div>
   </header>
 
   <div class="layout">
+    <!-- Sidebar -->
     {#if sidebarOpen}
       <aside class="sidebar">
-        <div class="sidebar-content">
-          <section class="sidebar-section">
-            <div class="section-header">
-              <Icon name="folder" size={18} />
-              <h3>Projekte</h3>
-            </div>
-            <ProjectList
-              {apiUrl}
-              selectedId={selectedProject?.id ?? null}
-              on:select={handleSelectProject}
-            />
-          </section>
+        <section class="sidebar-section">
+          <div class="section-header">
+            <Icon name="folder" size={16} />
+            <h3>Projekte</h3>
+          </div>
+          <ProjectList
+            {apiUrl}
+            refreshKey={projectListVersion}
+            selectedId={selectedProject?.id ?? null}
+            on:select={(e: CustomEvent<Project>) => handleSelectProject(e.detail)}
+          />
+        </section>
 
-          <section class="sidebar-section">
-            <div class="section-header">
-              <Icon name="settings" size={18} />
-              <h3>Neues Projekt</h3>
-            </div>
-            <ProjectForm on:submit={handleCreateProject} />
-          </section>
+        <section class="sidebar-section">
+          <button class="btn-create-project" on:click={() => (showNewProject = true)}>
+            <Icon name="cloud-upload" size={16} />
+            <span>Neues Projekt erstellen</span>
+          </button>
+        </section>
 
-          {#if selectedProject}
-            <section class="sidebar-section active-project">
-              <div class="section-header">
-                <Icon name="folder-open" size={18} />
-                <h3>Aktives Projekt</h3>
-              </div>
-              <div class="active-project-info">
-                <strong>{selectedProject.name}</strong>
-                {#if selectedProject.description}
-                  <p class="muted">{selectedProject.description}</p>
-                {/if}
-                <div class="bbox-badge">
-                  <Icon name="sliders" size={12} />
-                  <span>{selectedProject.bbox.join(', ')}</span>
+        {#if selectedProject}
+          <section class="sidebar-section">
+            <div class="section-header active">
+              <Icon name="folder-open" size={16} />
+              <h3>Aktiv</h3>
+            </div>
+            <div class="active-info">
+              <strong>{selectedProject.name}</strong>
+              {#if selectedProject.description}<span class="desc">{selectedProject.description}</span>{/if}
+              <span class="bbox">{selectedProject.bbox.join(', ')}</span>
+            </div>
+
+            {#if pipelineRunning}
+              <div class="pipeline-progress">
+                <div class="progress-header">
+                  <span class="progress-spinner"><Icon name="refresh" size={12} /></span>
+                  <span>Pipeline läuft...</span>
+                </div>
+                <div class="progress-bar">
+                  {#each ['prepare', 'harmonize', 'masks', 'terrain', 'snow', 'render', 'qa', 'viewer'] as stage}
+                    <div
+                      class="progress-segment"
+                      style="width: {pipelineProgress[stage as keyof typeof pipelineProgress]}%; background: {
+                        stage === 'prepare' ? '#3b82f6' :
+                        stage === 'harmonize' || stage === 'masks' || stage === 'terrain' ? '#8b5cf6' :
+                        stage === 'snow' || stage === 'render' ? '#a78bfa' :
+                        '#10b981'
+                      }"
+                    ></div>
+                  {/each}
                 </div>
               </div>
-            </section>
-          {/if}
-        </div>
+            {/if}
+          </section>
+        {/if}
       </aside>
     {/if}
 
+    <!-- Main content -->
     <main class="workspace">
-      {#if selectedProject}
-        <section class="panel project-panel">
+      {#if view === 'home'}
+        <!-- Welcome / Home state -->
+        <div class="home-state">
+          <div class="home-content">
+            <div class="home-icon">
+              <svg width="80" height="80" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 2v20M2 12h20M4.93 4.93l14.14 14.14M19.07 4.93L4.93 19.07" stroke-dasharray="2 2" />
+              </svg>
+            </div>
+            <h2>Willkommen bei Let It Snow</h2>
+            <p class="home-subtitle">Erstellen Sie ein neues Projekt oder wählen Sie ein bestehendes aus.</p>
+            <div class="home-actions">
+              <button class="btn-primary btn-lg" on:click={() => (showNewProject = true)}>
+                <Icon name="cloud-upload" size={20} />
+                Neues Projekt erstellen
+              </button>
+            </div>
+          </div>
+          <div class="home-steps">
+            <div class="step-card">
+              <div class="step-num">1</div>
+              <div class="step-text">
+                <strong>Projekt erstellen</strong>
+                <p>Region definieren mit BBox-Koordinaten</p>
+              </div>
+            </div>
+            <div class="step-card">
+              <div class="step-num">2</div>
+              <div class="step-text">
+                <strong>Pipeline starten</strong>
+                <p>Vollständig oder nur Schnee-Rendering</p>
+              </div>
+            </div>
+            <div class="step-card">
+              <div class="step-num">3</div>
+              <div class="step-text">
+                <strong>3D Viewer</strong>
+                <p>Interaktives Ergebnis betrachten</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      {:else}
+        <!-- Project view -->
+        <div class="project-panel">
           <div class="panel-header">
-            <h2>{selectedProject.name}</h2>
-            {#if selectedProject.description}
-              <p class="muted">{selectedProject.description}</p>
-            {/if}
+            <h2>{selectedProject!.name}</h2>
             <div class="tabs">
               <button
-                class={activeTab === 'processing' ? 'tab active' : 'tab'}
-                on:click={() => (activeTab = 'processing')}
+                class={activeTab === 'pipeline' ? 'tab active' : 'tab'}
+                on:click={() => (activeTab = 'pipeline')}
               >
-                <Icon name="play" size={16} className="tab-icon" />
-                <span>Verarbeitung</span>
+                <Icon name="layers" size={15} />
+                Pipeline
               </button>
               <button
                 class={activeTab === 'viewer' ? 'tab active' : 'tab'}
                 on:click={() => (activeTab = 'viewer')}
               >
-                <Icon name="eye" size={16} className="tab-icon" />
-                <span>3D Viewer</span>
+                <Icon name="eye" size={15} />
+                3D Viewer
               </button>
             </div>
           </div>
 
-          {#if activeTab === 'processing'}
-            <div class="processing-grid">
-              <section class="panel">
-                <h3>Daten vorbereiten</h3>
-                <p class="muted">Region herunterladen und konfigurieren</p>
-                <button type="button" class="btn-primary" on:click={handlePrepareRegion}>
-                  <Icon name="cloud-upload" size={18} className="btn-icon" />
-                  Region vorbereiten
-                </button>
-              </section>
-
-              <section class="panel">
-                <h3>Vollständiger Pipeline</h3>
-                <p class="muted">Harmonisierung → Masken → Terrain → Snow → Render → QA</p>
-                <button type="button" class="btn-primary" on:click={handleRunPipeline}>
-                  <Icon name="play" size={18} className="btn-icon" />
-                  Pipeline starten
-                </button>
-              </section>
-
-              <section class="panel">
-                <h3>Nur Schnee-Processing</h3>
-                <p class="muted">Ab Schneeoberfläche (benötigt vorherige Schritte)</p>
-                <button type="button" class="btn-secondary" on:click={handleRunSnowPipeline}>
-                  <Icon name="snow" size={18} className="btn-icon" />
-                  Schnee-Pipeline
-                </button>
-              </section>
-
-              <section class="panel">
-                <h3>3D Viewer exportieren</h3>
-                <p class="muted">Mesh und Texturen für Web-Viewer generieren</p>
-                <button type="button" class="btn-secondary" on:click={handleExportViewer}>
-                  <Icon name="download" size={18} className="btn-icon" />
-                  Viewer exportieren
-                </button>
-              </section>
-            </div>
+          {#if activeTab === 'pipeline'}
+            <!-- Pipeline tab -->
+            <PipelineActions
+              project={selectedProject!}
+              pipelineProgress={pipelineProgress}
+              pipelineRunning={pipelineRunning}
+              canRunSnow={hasPreparedProject}
+              canExportViewer={hasPreparedProject}
+              on:prepare={handlePrepareRegion}
+              on:full-pipeline={handleRunPipeline}
+              on:snow-pipeline={handleRunSnowPipeline}
+              on:export-viewer={handleExportViewer}
+            />
 
             <section class="panel">
-              <h3>Parameter</h3>
-              <div class="parameters-grid">
-                <div class="param-item">
-                  <label>Rendering Profil</label>
-                  <select bind:value={renderParams.profile}>
-                    <option value="default">Default</option>
-                  </select>
-                </div>
-                <div class="param-item">
-                  <label>Auflösung (m/px)</label>
-                  <input
-                    type="number"
-                    bind:value={renderParams.resolutionM}
-                    step="0.1"
-                    min="0.1"
-                    max="2.0"
-                  />
-                </div>
-                <div class="param-item">
-                  <label>Max Texture</label>
-                  <select bind:value={renderParams.maxTextureDim}>
-                    <option value="4096">4096 px</option>
-                    <option value="8192">8192 px</option>
-                    <option value="16384">16384 px</option>
-                  </select>
-                </div>
-                <div class="param-item">
-                  <label>Mesh Stride</label>
-                  <input
-                    type="number"
-                    bind:value={renderParams.stride}
-                    min="1"
-                    max="16"
-                  />
-                </div>
-              </div>
-            </section>
-
-            <section class="panel">
-              <GPXUpload projectId={selectedProject.id} {apiUrl} />
+              <GPXUpload projectId={selectedProject!.id} {apiUrl} />
             </section>
 
           {:else}
-            <section class="panel viewer-panel">
-              <div class="panel-header">
-                <h3>3D Viewer</h3>
-                <div class="viewer-toolbar">
-                  <label>
-                    Orthofoto
-                    <select bind:value={textureMode}>
-                      <option value="winter">Winter-Orthofoto (Standard)</option>
-                      <option value="summer">Sommer-Orthofoto</option>
-                    </select>
-                  </label>
-                  <label>
-                    Höhenmodell
-                    <select bind:value={elevationModel}>
-                      <option value="snow_surface">Schneedeckenhöhenmodell (Standard)</option>
-                      <option value="base">Sommerhöhenmodell</option>
-                    </select>
-                  </label>
-                  <button
-                    type="button"
-                    class="btn-secondary"
-                    on:click={() => {
-                      if (tileId) sceneUrl = `${apiUrl}/viewer/data/${tileId}/scene.json`;
-                    }}
-                    disabled={!tileId}
-                  >
-                    Viewer laden
-                  </button>
-                </div>
+            <!-- Viewer tab -->
+            <div class="viewer-panel">
+              <div class="viewer-toolbar">
+                <label class="toolbar-label">
+                  <Icon name="sun" size={14} />
+                  Orthofoto:
+                  <select bind:value={textureMode}>
+                    <option value="winter">Winter</option>
+                    <option value="summer">Sommer</option>
+                  </select>
+                </label>
+                <label class="toolbar-label">
+                  <Icon name="layers" size={14} />
+                  Höhenmodell:
+                  <select bind:value={elevationModel}>
+                    <option value="snow_surface">Schneehöhe</option>
+                    <option value="base">Sommer</option>
+                  </select>
+                </label>
+                <button class="btn-secondary" on:click={loadScene} disabled={!hasViewerData}>
+                  <Icon name="refresh" size={14} />
+                  Laden
+                </button>
               </div>
-              <ThreeViewer {sceneUrl} {textureMode} {elevationModel} elevationFactor={1.0} />
-              {#if !sceneUrl}
-                <p class="muted empty-message">
-                  <Icon name="cloud" size={48} className="empty-icon" />
-                  Noch keine Viewer-Daten. Führen Sie "Viewer exportieren" aus.
-                </p>
-              {/if}
-            </section>
+              <div class="viewer-container">
+                {#if sceneUrl}
+                  <ThreeViewer {sceneUrl} {textureMode} {elevationModel} elevationFactor={1.0} />
+                {:else}
+                  <div class="viewer-empty">
+                    <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" />
+                    </svg>
+                    <p>Keine Viewer-Daten vorhanden.<br />Führen Sie zuerst "3D Viewer exportieren" aus.</p>
+                  </div>
+                {/if}
+              </div>
+            </div>
           {/if}
-        </section>
-      {:else}
-        <section class="panel empty-state">
-          <Icon name="cloud" size={64} className="empty-icon" />
-          <h2>Kein Projekt ausgewählt</h2>
-          <p class="muted">
-            Wählen Sie ein Projekt aus der Sidebar oder erstellen Sie ein neues Projekt.
-          </p>
-        </section>
+        </div>
       {/if}
 
       {#if actionError}
         <div class="error-banner">
-          <Icon name="alert" size={20} />
-          <span>Error: {actionError}</span>
+          <Icon name="alert" size={18} />
+          <span>{actionError}</span>
+          <button class="close-btn" on:click={() => (actionError = null)}>×</button>
         </div>
       {/if}
     </main>
   </div>
 
+  <!-- New project modal -->
+  {#if showNewProject}
+    <div class="modal-backdrop" role="presentation">
+      <div class="modal" role="dialog" aria-modal="true" aria-label="Neues Projekt erstellen">
+        <ProjectNewModal on:submit={handleCreateProject} on:dismiss={() => (showNewProject = false)} />
+      </div>
+    </div>
+  {/if}
+
+  <!-- Task progress modal -->
   {#if taskId && taskModalOpen}
-    <div class="task-modal-backdrop" on:click={dismissTaskModal}>
-      <div class="task-modal" role="dialog" aria-modal="true" on:click|stopPropagation>
+    <div class="modal-backdrop" role="presentation">
+      <div class="modal modal-lg" role="dialog" aria-modal="true" aria-label="Task-Fortschritt">
         <TaskProgress {taskId} {apiUrl} on:complete={handleTaskComplete} on:dismiss={dismissTaskModal} />
       </div>
     </div>
@@ -414,31 +431,32 @@
 </div>
 
 <style>
+  :global(body) { margin: 0; background: #020617; }
+
   .app {
     min-height: 100vh;
-    background: #0f1115;
+    background: #020617;
     color: #e2e8f0;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    display: flex;
+    flex-direction: column;
   }
 
-  /* Header */
+  /* ─── Header ─── */
   .app-header {
     background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
-    border-bottom: 1px solid #334155;
-    padding: 0.75rem 1.5rem;
-    position: sticky;
-    top: 0;
-    z-index: 100;
+    border-bottom: 1px solid #1e293b;
+    padding: 0 1.5rem;
     display: flex;
     justify-content: space-between;
     align-items: center;
+    height: 60px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
   }
 
-  .header-content {
-    display: flex;
-    align-items: center;
-    gap: 1rem;
-  }
+  .header-left { display: flex; align-items: center; gap: 1rem; }
 
   .sidebar-toggle {
     display: none;
@@ -449,112 +467,94 @@
     padding: 0.25rem;
     border-radius: 0.375rem;
   }
+  .sidebar-toggle:hover { background: #334155; color: #f8fafc; }
 
-  .sidebar-toggle:hover {
-    background: #334155;
-    color: #f8fafc;
-  }
-
-  @media (max-width: 900px) {
-    .sidebar-toggle {
-      display: block;
-    }
+  @media (max-width: 800px) {
+    .sidebar-toggle { display: block; }
   }
 
   .logo {
+    appearance: none;
     display: flex;
     align-items: center;
-    gap: 0.75rem;
-  }
-
-  .logo-icon {
-    color: #38bdf8;
-    animation: spin 20s linear infinite;
-  }
-
-  @keyframes spin {
-    from { transform: rotate(0deg); }
-    to { transform: rotate(360deg); }
-  }
-
-  .logo h1 {
-    font-size: 1.5rem;
-    margin: 0;
-    color: #f8fafc;
-  }
-
-  .logo p {
-    margin: 0;
-    font-size: 0.875rem;
-    color: #94a3b8;
-  }
-
-  .user-menu {
-    display: flex;
-    gap: 0.5rem;
-  }
-
-  .btn-icon {
+    gap: 0.625rem;
+    cursor: pointer;
+    transition: opacity 0.15s;
     background: none;
     border: none;
-    color: #94a3b8;
-    cursor: pointer;
-    padding: 0.5rem;
-    border-radius: 0.375rem;
+    padding: 0;
+    color: inherit;
+    text-align: left;
+  }
+  .logo:hover { opacity: 0.85; }
+  .logo-icon { color: #38bdf8; animation: snowSpin 30s linear infinite; flex-shrink: 0; }
+
+  @keyframes snowSpin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+  .logo h1 {
+    font-size: 1.25rem;
+    margin: 0;
+    background: linear-gradient(90deg, #38bdf8, #818cf8);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .logo p { margin: 0; font-size: 0.75rem; color: #64748b; }
+
+  .header-right { display: flex; align-items: center; gap: 0.75rem; }
+
+  .project-badge {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.375rem 0.75rem;
+    background: #0f172a;
+    border: 1px solid #334155;
+    border-radius: 0.5rem;
+  }
+  .badge-name { font-size: 0.875rem; color: #f8fafc; font-weight: 500; }
+  .badge-running {
+    color: #f59e0b;
+    font-size: 0.625rem;
+    animation: pulse 1.5s ease-in-out infinite;
   }
 
-  .btn-icon:hover {
-    background: #334155;
-    color: #f8fafc;
-  }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 
-  /* Layout */
+  /* ─── Layout ─── */
   .layout {
     display: grid;
-    grid-template-columns: 320px 1fr;
-    gap: 1.5rem;
-    padding: 1.5rem;
-    min-height: calc(100vh - 60px);
+    grid-template-columns: 300px 1fr;
+    flex: 1;
   }
 
-  /* Sidebar */
+  @media (max-width: 800px) {
+    .layout { grid-template-columns: 1fr; }
+    .sidebar { display: none; position: fixed; inset: 60px 0 auto 0; z-index: 90; top: 60px; width: 100%; }
+  }
+
+  /* ─── Sidebar ─── */
   .sidebar {
-    background: #1e293b;
-    border: 1px solid #334155;
-    border-radius: 1rem;
+    background: #0f172a;
+    border-right: 1px solid #1e293b;
     padding: 1rem;
-    position: sticky;
-    top: 90px;
-    height: calc(100vh - 110px);
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
     overflow-y: auto;
   }
 
-  @media (max-width: 900px) {
-    .sidebar {
-      display: none;
-    }
-  }
-
-  .sidebar-section {
-    margin-bottom: 1.5rem;
-  }
-
-  .sidebar-section:last-child {
-    margin-bottom: 0;
-  }
+  .sidebar-section { display: flex; flex-direction: column; gap: 0.5rem; }
 
   .section-header {
     display: flex;
     align-items: center;
     gap: 0.5rem;
-    margin-bottom: 0.75rem;
-    padding: 0.5rem;
-    background: #0f172a;
+    padding: 0.375rem 0.5rem;
+    background: #1e293b;
     border-radius: 0.5rem;
   }
-
   .section-header h3 {
-    font-size: 0.875rem;
+    font-size: 0.75rem;
     font-weight: 600;
     margin: 0;
     text-transform: uppercase;
@@ -562,154 +562,174 @@
     color: #94a3b8;
   }
 
-  .active-project {
+  .section-header.active { background: rgba(56, 189, 248, 0.1); color: #38bdf8; }
+  .section-header.active h3 { color: #38bdf8; }
+
+  .btn-create-project {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.625rem 0.75rem;
+    background: #1e293b;
+    border: 1px dashed #334155;
+    border-radius: 0.5rem;
+    color: #94a3b8;
+    cursor: pointer;
+    font-size: 0.875rem;
+    width: 100%;
+    transition: all 0.2s;
+  }
+  .btn-create-project:hover { border-color: #38bdf8; color: #38bdf8; background: rgba(56, 189, 248, 0.05); }
+
+  .active-info {
+    padding: 0.75rem;
     background: rgba(56, 189, 248, 0.05);
     border: 1px solid rgba(56, 189, 248, 0.2);
-  }
-
-  .active-project .section-header {
-    color: #38bdf8;
-    background: rgba(56, 189, 248, 0.1);
-  }
-
-  .active-project-info {
-    padding: 0.75rem;
-    background: #0f172a;
     border-radius: 0.5rem;
   }
+  .active-info strong { display: block; font-size: 0.9375rem; color: #f8fafc; }
+  .active-info .desc { display: block; font-size: 0.8125rem; color: #94a3b8; margin-top: 0.25rem; }
+  .active-info .bbox { display: inline-flex; align-items: center; gap: 0.375rem; font-size: 0.75rem; color: #64748b; margin-top: 0.375rem; padding: 0.25rem 0.5rem; background: #0f172a; border-radius: 0.25rem; }
 
-  .active-project-info strong {
-    display: block;
-    font-size: 1.125rem;
-    margin-bottom: 0.25rem;
-    color: #f8fafc;
+  /* Pipeline progress in sidebar */
+  .pipeline-progress {
+    margin-top: 0.75rem;
+    padding: 0.75rem;
+    background: rgba(245, 158, 11, 0.05);
+    border: 1px solid rgba(245, 158, 11, 0.2);
+    border-radius: 0.5rem;
   }
-
-  .active-project-info p {
-    margin: 0.25rem 0 0.75rem;
-    font-size: 0.875rem;
-    color: #94a3b8;
-  }
-
-  .bbox-badge {
+  .progress-header {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
+    gap: 0.375rem;
     font-size: 0.75rem;
-    padding: 0.25rem 0.5rem;
+    color: #f59e0b;
+    margin-bottom: 0.5rem;
+  }
+  .progress-spinner { animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .progress-bar {
+    display: flex;
+    gap: 2px;
+    height: 4px;
     background: #1e293b;
-    border-radius: 0.25rem;
-    color: #94a3b8;
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .progress-segment {
+    transition: width 0.5s ease;
+    border-radius: 2px;
   }
 
-  /* Workspace */
-  .workspace {
+  /* ─── Home / Welcome state ─── */
+  .home-state {
+    flex: 1;
     display: flex;
     flex-direction: column;
-    gap: 1.5rem;
+    align-items: center;
+    justify-content: center;
+    gap: 3rem;
+    padding: 3rem 2rem;
   }
+  .home-content {
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1.25rem;
+  }
+  .home-icon {
+    width: 80px;
+    height: 80px;
+    border-radius: 2rem;
+    background: linear-gradient(135deg, rgba(56,189,248,0.1), rgba(129,140,248,0.1));
+    display: grid;
+    place-items: center;
+    color: #38bdf8;
+    animation: float 3s ease-in-out infinite;
+  }
+  @keyframes float { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-8px); } }
+  .home-content h2 { font-size: 2rem; color: #f8fafc; margin: 0; }
+  .home-subtitle { font-size: 1.0625rem; color: #94a3b8; max-width: 400px; }
+  .btn-lg { padding: 0.75rem 1.5rem; font-size: 1rem; }
 
-  .panel {
+  .home-steps {
+    display: flex;
+    gap: 1.5rem;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  .step-card {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.875rem;
+    padding: 1rem 1.25rem;
     background: #1e293b;
     border: 1px solid #334155;
-    border-radius: 1rem;
-    padding: 1.25rem;
+    border-radius: 0.75rem;
+    max-width: 280px;
   }
+  .step-num {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #3b82f6, #2563eb);
+    display: grid;
+    place-items: center;
+    font-size: 0.875rem;
+    font-weight: 700;
+    color: white;
+    flex-shrink: 0;
+  }
+  .step-text strong { display: block; font-size: 0.9375rem; color: #f8fafc; margin-bottom: 0.125rem; }
+  .step-text p { margin: 0; font-size: 0.8125rem; color: #94a3b8; }
 
-  .panel-header {
+  /* ─── Workspace ─── */
+  .workspace {
+    flex: 1;
+    padding: 1.5rem;
     display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 1rem;
+    flex-direction: column;
+    gap: 1.25rem;
+    overflow-y: auto;
   }
 
-  .panel-header h2,
-  .panel-header h3 {
-    margin: 0;
-  }
+  /* ─── Project panel ─── */
+  .project-panel { flex: 1; display: flex; flex-direction: column; gap: 1.25rem; }
 
-  .viewer-toolbar {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-  }
+  .panel-header { display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap; }
+  .panel-header h2 { margin: 0; font-size: 1.25rem; color: #f8fafc; }
 
-  .viewer-toolbar label {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    color: #cbd5e1;
-    font-size: 0.85rem;
-  }
-
-  .viewer-toolbar select {
-    background: #0f172a;
-    border: 1px solid #475569;
-    border-radius: 0.5rem;
-    color: #e2e8f0;
-    padding: 0.4rem 0.6rem;
-    font: inherit;
-  }
-
-  .tabs {
-    display: flex;
-    gap: 0.25rem;
-  }
-
+  .tabs { display: flex; gap: 0.25rem; background: #1e293b; padding: 0.25rem; border-radius: 0.625rem; }
   .tab {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
-    padding: 0.5rem 0.75rem;
+    gap: 0.375rem;
+    padding: 0.5rem 0.875rem;
     background: none;
     border: none;
     border-radius: 0.375rem;
     color: #94a3b8;
     cursor: pointer;
-    transition: all 0.2s;
+    transition: all 0.15s;
     font-size: 0.875rem;
   }
+  .tab:hover { color: #f8fafc; }
+  .tab.active { background: #38bdf8; color: #0f172a; font-weight: 600; }
 
-  .tab:hover {
-    background: #334155;
-    color: #f8fafc;
+  /* ─── Panel ─── */
+  .panel {
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 0.875rem;
+    padding: 1.25rem;
   }
 
-  .tab.active {
-    background: #38bdf8;
-    color: #0f172a;
-  }
-
-  .tab-icon {
-    color: inherit;
-  }
-
-  /* Processing Grid */
-  .processing-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-    gap: 1rem;
-    margin-bottom: 1.5rem;
-  }
-
-  .processing-grid h3,
-  .panel h3 {
-    font-size: 1rem;
-    margin: 0 0 0.5rem;
-    color: #f8fafc;
-  }
-
-  .processing-grid p,
-  .panel p.muted {
-    font-size: 0.875rem;
-    color: #94a3b8;
-    margin: 0 0 1rem;
-  }
-
-  /* Buttons */
-  .btn-primary,
-  .btn-secondary {
-    display: flex;
+  /* ─── Buttons ─── */
+  .btn-primary, .btn-secondary {
+    display: inline-flex;
     align-items: center;
     gap: 0.5rem;
     padding: 0.5rem 1rem;
@@ -719,140 +739,97 @@
     font-size: 0.875rem;
     font-weight: 500;
     transition: all 0.2s;
-    width: 100%;
-    justify-content: center;
   }
-
   .btn-primary {
-    background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+    background: linear-gradient(135deg, #3b82f6, #2563eb);
     color: white;
+    box-shadow: 0 2px 8px rgba(59, 130, 246, 0.3);
+  }
+  .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 4px 14px rgba(37, 99, 235, 0.4); }
+  .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; transform: none; box-shadow: none; }
+  .btn-secondary { background: #334155; color: #e2e8f0; }
+  .btn-secondary:hover { background: #475569; transform: translateY(-1px); }
+  .btn-secondary:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+  .close-btn {
+    background: none;
+    border: none;
+    color: inherit;
+    font-size: 1.25rem;
+    cursor: pointer;
+    padding: 0 0.25rem;
   }
 
-  .btn-primary:hover {
-    background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
-    transform: translateY(-1px);
-    box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3);
-  }
+  /* ─── Viewer ─── */
+  .viewer-panel { flex: 1; display: flex; flex-direction: column; gap: 0.75rem; }
 
-  .btn-secondary {
-    background: #334155;
-    color: #e2e8f0;
-  }
-
-  .btn-secondary:hover {
-    background: #475569;
-    transform: translateY(-1px);
-  }
-
-  .btn-icon {
-    width: 18px;
-    height: 18px;
-  }
-
-  /* Parameters */
-  .parameters-grid {
-    display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    gap: 1rem;
-    margin-bottom: 1.5rem;
-  }
-
-  .param-item {
+  .viewer-toolbar {
     display: flex;
-    flex-direction: column;
-    gap: 0.35rem;
+    align-items: center;
+    gap: 1.25rem;
+    flex-wrap: wrap;
+    padding: 0.75rem 1rem;
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 0.625rem;
   }
-
-  .param-item label {
-    font-size: 0.875rem;
-    color: #cbd5e1;
+  .toolbar-label {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    color: #94a3b8;
+    font-size: 0.8125rem;
   }
-
-  .param-item input,
-  .param-item select {
+  .toolbar-label select {
     background: #0f172a;
     border: 1px solid #475569;
-    border-radius: 0.5rem;
+    border-radius: 0.375rem;
     color: #e2e8f0;
-    padding: 0.5rem;
+    padding: 0.25rem 0.5rem;
     font: inherit;
   }
 
-  .param-item input:focus,
-  .param-item select:focus {
-    outline: none;
-    border-color: #38bdf8;
-    box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.2);
+  .viewer-container {
+    flex: 1;
+    min-height: 500px;
+    border-radius: 0.75rem;
+    overflow: hidden;
+    background: #0f172a;
+    border: 1px solid #1e293b;
   }
 
-  .task-modal-backdrop {
+  .viewer-empty {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    color: #64748b;
+    gap: 1rem;
+    padding: 2rem;
+  }
+
+  /* ─── Modal ─── */
+  .modal-backdrop {
     position: fixed;
     inset: 0;
-    background: rgba(2, 6, 23, 0.72);
-    backdrop-filter: blur(3px);
-    z-index: 1200;
+    background: rgba(2, 6, 23, 0.8);
+    backdrop-filter: blur(4px);
+    z-index: 500;
     display: grid;
     place-items: center;
     padding: 1rem;
   }
-
-  .task-modal {
-    width: min(780px, 95vw);
-    max-height: 90vh;
-    overflow: auto;
-    border-radius: 14px;
-    box-shadow: 0 24px 70px rgba(0, 0, 0, 0.5);
+  .modal {
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 1rem;
+    width: min(480px, 95vw);
+    box-shadow: 0 24px 70px rgba(0,0,0,0.5);
   }
+  .modal-lg { width: min(820px, 95vw); max-height: 90vh; overflow-y: auto; }
 
-  /* Viewer Panel */
-  .viewer-panel {
-    min-height: 600px;
-    display: flex;
-    flex-direction: column;
-  }
-
-  .viewer-panel > div {
-    flex: 1;
-    min-height: 0;
-  }
-
-  .empty-message {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    padding: 4rem 2rem;
-    color: #94a3b8;
-  }
-
-  .empty-icon {
-    color: #334155;
-    margin-bottom: 1rem;
-    animation: float 3s ease-in-out infinite;
-  }
-
-  @keyframes float {
-    0%, 100% { transform: translateY(0); }
-    50% { transform: translateY(-10px); }
-  }
-
-  /* Empty State */
-  .empty-state {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    min-height: 500px;
-    text-align: center;
-  }
-
-  .empty-state h2 {
-    font-size: 1.75rem;
-    margin: 1rem 0 0.5rem;
-    color: #f8fafc;
-  }
-
-  /* Error */
+  /* ─── Error banner ─── */
   .error-banner {
     display: flex;
     align-items: center;
@@ -861,15 +838,7 @@
     background: rgba(239, 68, 68, 0.1);
     border: 1px solid rgba(239, 68, 68, 0.3);
     border-radius: 0.5rem;
-    color: #ef4444;
-  }
-
-  .error-banner svg {
-    flex-shrink: 0;
-  }
-
-  /* Muted text */
-  .muted {
-    color: #94a3b8;
+    color: #fca5a5;
+    font-size: 0.875rem;
   }
 </style>

@@ -3,6 +3,7 @@
 
   export let apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
   export let selectedId: number | null = null;
+  export let refreshKey = 0;
 
   type Project = {
     id: number;
@@ -17,8 +18,11 @@
   let projects: Project[] = [];
   let loading = true;
   let error: string | null = null;
+  let lastRefreshKey = refreshKey;
 
-  onMount(async () => {
+  async function loadProjects() {
+    loading = true;
+    error = null;
     try {
       const res = await fetch(`${apiUrl}/projects`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -28,7 +32,14 @@
     } finally {
       loading = false;
     }
-  });
+  }
+
+  onMount(loadProjects);
+
+  $: if (refreshKey !== lastRefreshKey) {
+    lastRefreshKey = refreshKey;
+    loadProjects();
+  }
 
   function selectProject(project: Project) {
     dispatch('select', project);
@@ -48,7 +59,7 @@
     </div>
   {:else if error}
     <div class="error">
-      <span>Error: {error}</span>
+      <span>Fehler: {error}</span>
     </div>
   {:else if projects.length === 0}
     <div class="empty">
@@ -57,28 +68,29 @@
   {:else}
     <ul class="projects">
       {#each projects as project}
-        <li
-          class="project-item {project.id === selectedId ? 'selected' : ''}"
-          on:click={() => selectProject(project)}
-          on:keydown={(e) => e.key === 'Enter' && selectProject(project)}
-          tabindex="0"
-          role="button"
-        >
-          <div class="project-header">
-            <div class="project-name">{project.name}</div>
-            {#if project.id === selectedId}
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M20 6 9 17l-5-5"/>
-              </svg>
+        <li>
+          <button
+            type="button"
+            class="project-item {project.id === selectedId ? 'selected' : ''}"
+            on:click={() => selectProject(project)}
+            aria-pressed={project.id === selectedId}
+          >
+            <div class="project-header">
+              <div class="project-name">{project.name}</div>
+              {#if project.id === selectedId}
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M20 6 9 17l-5-5"/>
+                </svg>
+              {/if}
+            </div>
+            {#if project.description}
+              <div class="project-description">{project.description}</div>
             {/if}
-          </div>
-          {#if project.description}
-            <div class="project-description">{project.description}</div>
-          {/if}
-          <div class="project-meta">
-            <span class="bbox">{project.bbox.join(', ')}</span>
-            <span class="date">{formatDate(project.created_at)}</span>
-          </div>
+            <div class="project-meta">
+              <span class="bbox">{project.bbox.join(', ')}</span>
+              <span class="date">{formatDate(project.created_at)}</span>
+            </div>
+          </button>
         </li>
       {/each}
     </ul>
@@ -101,8 +113,7 @@
     color: #94a3b8;
   }
 
-  .loading .spinner,
-  .error .spinner {
+  .spinner {
     width: 24px;
     height: 24px;
     border: 2px solid #334155;
@@ -120,22 +131,29 @@
     list-style: none;
     padding: 0;
     margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
   }
 
   .project-item {
+    width: 100%;
     padding: 0.75rem;
-    margin-bottom: 0.5rem;
     background: #0f172a;
     border-radius: 0.5rem;
     border: 1px solid #334155;
     transition: all 0.2s;
     cursor: pointer;
+    text-align: left;
+    color: inherit;
   }
 
-  .project-item:hover {
+  .project-item:hover,
+  .project-item:focus-visible {
     border-color: #38bdf8;
     transform: translateY(-1px);
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    outline: none;
   }
 
   .project-item.selected {
@@ -164,8 +182,15 @@
   .project-meta {
     display: flex;
     justify-content: space-between;
+    gap: 0.75rem;
     font-size: 0.75rem;
     color: #64748b;
+  }
+
+  .bbox {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .error {
