@@ -54,7 +54,7 @@ class PrepareRegionRequest(BaseModel):
 class PipelineRequest(BaseModel):
     project_id: int
     tile_id: str
-    profile: str
+    profile: str = "default"
     config_path: str = ""
 
 
@@ -71,3 +71,10 @@ class TaskStatusResponse(BaseModel):
     progress: float
     message: Optional[str] = None
     results: Optional[dict] = None
+
+
+class PipelineStatusResponse(BaseModel):
+    tile_id: str
+    config_path: Optional[str] = None
+    progress: dict[str, int]
+    scene_url: Optional[str] = None

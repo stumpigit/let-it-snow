@@ -11,28 +11,18 @@
 
   const apiUrl = (import.meta as any).env?.VITE_API_URL || 'http://localhost:8000';
 
-  // --- State ---
-  let selectedProject: Project | null = null;
-  let view = 'home' as 'home' | 'project'; // home = no project, project = selected
-  let activeTab = 'pipeline' as 'pipeline' | 'viewer';
-  let sidebarOpen = true;
-  let showNewProject = false;
-  let actionError: string | null = null;
-  let projectListVersion = 0;
+  type PipelineProgress = {
+    prepare: number;
+    harmonize: number;
+    masks: number;
+    terrain: number;
+    snow: number;
+    render: number;
+    qa: number;
+    viewer: number;
+  };
 
-  // Per-project runtime state
-  let tileId = '';
-  let configPath = '';
-  let sceneUrl = '';
-  let taskId: string | null = null;
-  let taskModalOpen = false;
-  let pipelineRunning = false;
-  let currentStage = '';
-  let textureMode: 'winter' | 'summer' = 'winter';
-  let elevationModel: 'snow_surface' | 'base' = 'snow_surface';
-
-  // Pipeline progress state
-  let pipelineProgress = {
+  const emptyProgress = (): PipelineProgress => ({
     prepare: 0,
     harmonize: 0,
     masks: 0,
@@ -41,7 +31,32 @@
     render: 0,
     qa: 0,
     viewer: 0,
-  };
+  });
+
+  // --- State ---
+  let selectedProject = $state<Project | null>(null);
+  let view = $state<'home' | 'project'>('home');
+  let activeTab = $state<'pipeline' | 'viewer'>('pipeline');
+  let sidebarOpen = $state(true);
+  let showNewProject = $state(false);
+  let actionError = $state<string | null>(null);
+  let projectListVersion = $state(0);
+
+  // Per-project runtime state
+  let tileId = $state('');
+  let configPath = $state('');
+  let sceneUrl = $state('');
+  let taskId = $state<string | null>(null);
+  let taskModalOpen = $state(false);
+  let pipelineRunning = $state(false);
+  let currentStage = $state('');
+  let textureMode = $state<'winter' | 'summer'>('winter');
+  let elevationModel = $state<'snow_surface' | 'base'>('snow_surface');
+  let pipelineProgress = $state<PipelineProgress>(emptyProgress());
+  let renderProfile = $state('default');
+  let resolutionM = $state(0.5);
+  let maxTextureDim = $state(8192);
+  let meshStride = $state(2);
 
   // --- Helpers ---
   function regionSlug(name: string): string {
@@ -72,7 +87,21 @@
     } catch (e: any) { actionError = e.message; }
   }
 
-  function handleSelectProject(project: Project) {
+  function applyPipelineStatus(status: {
+    tile_id?: string;
+    config_path?: string | null;
+    scene_url?: string | null;
+    progress?: Partial<PipelineProgress>;
+  }) {
+    if (typeof status.tile_id === 'string') tileId = status.tile_id;
+    if (typeof status.config_path === 'string') configPath = status.config_path;
+    if (typeof status.scene_url === 'string') sceneUrl = `${apiUrl}${status.scene_url}`;
+    if (status.progress) {
+      pipelineProgress = { ...emptyProgress(), ...status.progress };
+    }
+  }
+
+  async function handleSelectProject(project: Project) {
     selectedProject = project;
     tileId = `${regionSlug(project.name)}_001`;
     actionError = null;
@@ -80,8 +109,19 @@
     configPath = '';
     sceneUrl = '';
     activeTab = 'pipeline';
-    pipelineProgress = { prepare: 0, harmonize: 0, masks: 0, terrain: 0, snow: 0, render: 0, qa: 0, viewer: 0 };
+    pipelineProgress = emptyProgress();
     view = 'project';
+
+    try {
+      const res = await fetch(`${apiUrl}/projects/${project.id}/pipeline-status`);
+      if (!res.ok) {
+        actionError = `Pipeline-Status konnte nicht geladen werden (HTTP ${res.status})`;
+        return;
+      }
+      applyPipelineStatus(await res.json());
+    } catch (e: any) {
+      actionError = e?.message ?? 'Pipeline-Status konnte nicht geladen werden';
+    }
   }
 
   // --- Pipeline actions ---
@@ -120,6 +160,7 @@
       project_id: selectedProject.id,
       tile_id: tileId,
       config_path: configPath,
+      profile: renderProfile,
     });
   }
 
@@ -129,6 +170,7 @@
       project_id: selectedProject.id,
       tile_id: tileId,
       config_path: configPath,
+      profile: renderProfile,
     });
   }
 
@@ -138,30 +180,43 @@
       project_id: selectedProject.id,
       tile_id: tileId,
       config_path: configPath,
+      params: {
+        profile: renderProfile,
+        resolution_m: resolutionM,
+        max_texture_dim: Number(maxTextureDim),
+        stride: meshStride,
+      },
     });
   }
 
-  function handleTaskComplete(event: CustomEvent<{ status: string; progress?: Record<string, unknown> }>) {
+  async function handleTaskComplete(event: CustomEvent<{ status: string; progress?: Record<string, unknown> }>) {
     const result = event.detail.progress;
     if (!result) return;
+
     pipelineRunning = event.detail.status === 'RUNNING';
+
     if (event.detail.status === 'SUCCESS') {
       if (typeof result.config_path === 'string') configPath = result.config_path;
       if (typeof result.tile_id === 'string') tileId = result.tile_id;
       if (typeof result.scene_url === 'string') sceneUrl = `${apiUrl}${result.scene_url}`;
+      currentStage = '';
+      pipelineRunning = false;
+
+      if (selectedProject) {
+        try {
+          const res = await fetch(`${apiUrl}/projects/${selectedProject.id}/pipeline-status`);
+          if (res.ok) applyPipelineStatus(await res.json());
+        } catch {
+          // Keep partial updates from the task result below.
+        }
+      }
+    } else if (event.detail.status === 'FAILURE') {
+      pipelineRunning = false;
     }
-    // Update stage progress
+
     for (const [stage, pct] of Object.entries(result)) {
       if (typeof pct === 'number' && stage in pipelineProgress) {
         pipelineProgress = { ...pipelineProgress, [stage]: pct };
-      }
-    }
-    if (event.detail.status === 'SUCCESS') {
-      currentStage = '';
-      // Set all completed stages to 100
-      const completedStages = ['prepare', 'harmonize', 'masks', 'terrain', 'snow', 'render', 'qa', 'viewer'];
-      for (const s of completedStages) {
-        pipelineProgress = { ...pipelineProgress, [s]: 100 };
       }
     }
   }
@@ -178,8 +233,14 @@
     actionError = null;
   }
 
-  $: hasPreparedProject = !!configPath || pipelineProgress.prepare > 0;
-  $: hasViewerData = !!sceneUrl || pipelineProgress.viewer > 0;
+  const canRunFullPipeline = $derived(!!configPath || pipelineProgress.prepare >= 100);
+  const canRunSnowPipeline = $derived(
+    pipelineProgress.harmonize >= 100 &&
+    pipelineProgress.masks >= 100 &&
+    pipelineProgress.terrain >= 100
+  );
+  const canExportViewer = $derived(pipelineProgress.qa >= 100);
+  const hasViewerData = $derived(!!sceneUrl || pipelineProgress.viewer >= 100);
 </script>
 
 <div class="app">
@@ -298,7 +359,7 @@
               <div class="step-num">1</div>
               <div class="step-text">
                 <strong>Projekt erstellen</strong>
-                <p>Region definieren mit BBox-Koordinaten</p>
+                <p>Region mit BBox-Koordinaten in EPSG:2056 (LV95) definieren</p>
               </div>
             </div>
             <div class="step-card">
@@ -347,8 +408,13 @@
               project={selectedProject!}
               pipelineProgress={pipelineProgress}
               pipelineRunning={pipelineRunning}
-              canRunSnow={hasPreparedProject}
-              canExportViewer={hasPreparedProject}
+              canRunFullPipeline={canRunFullPipeline}
+              canRunSnowPipeline={canRunSnowPipeline}
+              canExportViewer={canExportViewer}
+              bind:renderProfile
+              bind:resolutionM
+              bind:maxTextureDim
+              bind:meshStride
               on:prepare={handlePrepareRegion}
               on:full-pipeline={handleRunPipeline}
               on:snow-pipeline={handleRunSnowPipeline}

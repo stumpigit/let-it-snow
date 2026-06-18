@@ -14,13 +14,19 @@
     projectNameInput?.focus();
   });
 
+  // Approximate Swiss LV95 extent (EPSG:2056)
+  const LV95 = { minE: 2_485_000, maxE: 2_834_000, minN: 1_075_000, maxN: 1_296_000 };
+
   function parseBbox(raw: string): number[] | null {
     const parts = raw.trim().split(',').map((s) => parseFloat(s.trim()));
     if (parts.length !== 4 || parts.some((value) => Number.isNaN(value))) return null;
 
     const [minx, miny, maxx, maxy] = parts;
     if (minx >= maxx || miny >= maxy) return null;
-    if (minx < -180 || maxx > 180 || miny < -90 || maxy > 90) return null;
+    if (
+      minx < LV95.minE || maxx > LV95.maxE ||
+      miny < LV95.minN || maxy > LV95.maxN
+    ) return null;
 
     return parts;
   }
@@ -35,7 +41,7 @@
 
     const parsedBbox = parseBbox(bbox);
     if (!parsedBbox) {
-      error = 'Ungültige BBox. Format: minx, miny, maxx, maxy mit gültigen WGS84-Koordinaten.';
+      error = 'Ungültige BBox. Format: minx, miny, maxx, maxy mit gültigen EPSG:2056-Koordinaten (LV95).';
       return;
     }
 
@@ -92,7 +98,7 @@
     </div>
 
     <div class="form-group">
-      <label for="bbox">BBox (Bounding Box)</label>
+      <label for="bbox">BBox (EPSG:2056)</label>
       <input
         id="bbox"
         type="text"
@@ -100,8 +106,8 @@
         placeholder="minx, miny, maxx, maxy"
       />
       <p class="field-hint">
-        Koordinaten in WGS84 (Längen-, Breitengrad), mit <code>minx &lt; maxx</code> und <code>miny &lt; maxy</code>.
-        <br />Beispiel: <code>6.1, 46.2, 6.5, 46.5</code>
+        Koordinaten in EPSG:2056 (LV95), mit <code>minx &lt; maxx</code> und <code>miny &lt; maxy</code>.
+        <br />Beispiel: <code>2788000, 1181000, 2792000, 1185000</code>
       </p>
     </div>
 

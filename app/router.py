@@ -17,7 +17,9 @@ from app.schemas import (
     PrepareRegionRequest,
     PipelineRequest,
     ExportViewerRequest,
+    PipelineStatusResponse,
 )
+from app.pipeline_status import get_pipeline_status
 
 # DB setup
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./app.db")
@@ -91,6 +93,15 @@ def update_project(project_id: int, project: ProjectUpdate, db: Session = Depend
     db.commit()
     db.refresh(db_project)
     return db_project
+
+@router.get("/projects/{project_id}/pipeline-status", response_model=PipelineStatusResponse)
+def project_pipeline_status(project_id: int, db: Session = Depends(get_db)):
+    """Detect completed pipeline steps from files on disk."""
+    db_project = db.execute(select(Project).where(Project.id == project_id)).scalars().first()
+    if not db_project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return get_pipeline_status(db_project.name)
+
 
 @router.delete("/projects/{project_id}")
 def delete_project(project_id: int, db: Session = Depends(get_db)):

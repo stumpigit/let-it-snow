@@ -1,33 +1,31 @@
 <script lang="ts">
   import { createEventDispatcher, onMount } from 'svelte';
 
-  export let taskId: string = '';
-  export let apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+  let { taskId = '', apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000' } = $props();
 
   const dispatch = createEventDispatcher();
 
-  let status = '';
-  let progress = 0;
-  let message = '';
-  let error: string | null = null;
-  let intervalId: number | null = null;
-  let completed = false;
-  let taskData: Record<string, unknown> | null = null;
-  let updatedAtLabel = '';
-  let startedAtMs: number | null = null;
-  let nowMs = Date.now();
-  let timelineSteps: string[] = [];
-  let logEntries: Array<{ time: string; text: string; kind: 'substep' | 'info' | 'warn' | 'step' }> = [];
+  let status = $state('');
+  let progress = $state(0);
+  let message = $state('');
+  let error = $state<string | null>(null);
+  let completed = $state(false);
+  let taskData = $state<Record<string, unknown> | null>(null);
+  let updatedAtLabel = $state('');
+  let startedAtMs = $state<number | null>(null);
+  let nowMs = $state(Date.now());
+  let timelineSteps = $state<string[]>([]);
+  let logEntries = $state<Array<{ time: string; text: string; kind: 'substep' | 'info' | 'warn' | 'step' }>>([]);
+  let logOpen = $state(false);
 
-  $: progressPercent = Math.max(0, Math.min(100, Math.round(progress * 100)));
-  $: runtimeSeconds = startedAtMs ? Math.max(0, Math.floor((nowMs - startedAtMs) / 1000)) : 0;
-  $: runtimeLabel = runtimeSeconds ? formatDuration(runtimeSeconds) : 'läuft...';
-  $: currentStep = Number(taskData?.current ?? 0);
-  $: totalSteps = Number(taskData?.total ?? 0);
-  $: stepLabel = currentStep > 0 && totalSteps > 0 ? `${currentStep}/${totalSteps}` : '-';
-  $: statusClass = getStatusClass(status);
-  $: detailRows = buildDetailRows(taskData);
-  $: activeStep = typeof taskData?.step === 'string' ? String(taskData.step) : '';
+  const progressPercent = $derived(Math.max(0, Math.min(100, Math.round(progress * 100))));
+  const runtimeSeconds = $derived(startedAtMs ? Math.max(0, Math.floor((nowMs - startedAtMs) / 1000)) : 0);
+  const runtimeLabel = $derived(runtimeSeconds ? formatDuration(runtimeSeconds) : 'läuft...');
+  const currentStep = $derived(Number(taskData?.current ?? 0));
+  const totalSteps = $derived(Number(taskData?.total ?? 0));
+  const stepLabel = $derived(currentStep > 0 && totalSteps > 0 ? `${currentStep}/${totalSteps}` : '-');
+  const statusClass = $derived(getStatusClass(status));
+  const activeStep = $derived(typeof taskData?.step === 'string' ? String(taskData.step) : '');
 
   function formatDuration(seconds: number): string {
     const mins = Math.floor(seconds / 60);
@@ -48,26 +46,6 @@
     return null;
   }
 
-  function buildDetailRows(data: Record<string, unknown> | null): Array<{ key: string; value: string }> {
-    if (!data) return [];
-    const preferred = ['project_id', 'tile_id', 'profile', 'config_path', 'started_at', 'updated_at'];
-    const rows: Array<{ key: string; value: string }> = [];
-
-    for (const key of preferred) {
-      const value = data[key];
-      if (value !== undefined && value !== null && value !== '') {
-        rows.push({ key, value: String(value) });
-      }
-    }
-
-    for (const [key, value] of Object.entries(data)) {
-      if (preferred.includes(key) || key === 'step' || key === 'progress' || key === 'current' || key === 'total' || key === 'steps') continue;
-      if (value === undefined || value === null) continue;
-      rows.push({ key, value: typeof value === 'object' ? JSON.stringify(value) : String(value) });
-    }
-    return rows;
-  }
-
   function syncTimeline(data: Record<string, unknown> | null): void {
     if (!data) return;
     const steps = data.steps;
@@ -77,18 +55,6 @@
         timelineSteps = cleaned;
       }
     }
-    if (
-      timelineSteps.length === 0 &&
-      typeof data.step === 'string' &&
-      data.step.length > 0 &&
-      !data.step.startsWith('→ ') &&
-      !data.step.startsWith('i ') &&
-      !data.step.startsWith('! ') &&
-      data.step !== 'Initialisierung' &&
-      !timelineSteps.includes(data.step)
-    ) {
-      timelineSteps = [...timelineSteps, data.step];
-    }
   }
 
   function stepState(index: number, name: string): 'done' | 'active' | 'pending' {
@@ -96,7 +62,8 @@
     if (status === 'FAILURE') {
       const failedIndex =
         currentStep > 0 ? currentStep - 1 : timelineSteps.findIndex((step) => step === activeStep);
-      return index < failedIndex ? 'done' : 'pending';
+      if (failedIndex < 0) return index === 0 ? 'pending' : 'pending';
+      return index < failedIndex ? 'done' : index === failedIndex ? 'active' : 'pending';
     }
     if (activeStep === 'Initialisierung') {
       return index === 0 ? 'active' : 'pending';
@@ -105,10 +72,10 @@
       currentStep > 0 ? currentStep - 1 : timelineSteps.findIndex((step) => step === activeStep);
     if (activeIndex >= 0) {
       if (index < activeIndex) return 'done';
-      if (index === activeIndex) return status === 'FAILURE' ? 'pending' : 'active';
+      if (index === activeIndex) return 'active';
       return 'pending';
     }
-    if (name === activeStep) return status === 'FAILURE' ? 'pending' : 'active';
+    if (name === activeStep) return 'active';
     return 'pending';
   }
 
@@ -124,12 +91,14 @@
     if (!clean) return;
     const last = logEntries[logEntries.length - 1];
     if (last && last.text === clean) return;
-    const entry = {
-      time: new Date().toLocaleTimeString(),
-      text: clean,
-      kind: messageKind(clean),
-    };
-    logEntries = [...logEntries, entry].slice(-20);
+    logEntries = [
+      ...logEntries,
+      {
+        time: new Date().toLocaleTimeString(),
+        text: clean,
+        kind: messageKind(clean),
+      },
+    ].slice(-20);
   }
 
   onMount(() => {
@@ -163,8 +132,7 @@
             if (!Number.isNaN(parsed)) startedAtMs = parsed;
           }
           if (typeof data.progress.updated_at === 'string') {
-            const parsed = new Date(data.progress.updated_at);
-            updatedAtLabel = parsed.toLocaleTimeString();
+            updatedAtLabel = new Date(data.progress.updated_at).toLocaleTimeString();
           } else {
             updatedAtLabel = new Date().toLocaleTimeString();
           }
@@ -188,12 +156,13 @@
       }
     }
 
+    let intervalId: number;
     fetchStatus();
-    intervalId = window.setInterval(fetchStatus, 2000);
+    intervalId = window.setInterval(fetchStatus, 1000);
 
     return () => {
       clearInterval(clock);
-      if (intervalId) clearInterval(intervalId);
+      clearInterval(intervalId);
     };
   });
 </script>
@@ -201,12 +170,12 @@
 <div class="task-progress">
   <div class="tp-header">
     <div>
-      <h4>Task Fortschritt</h4>
-      <p class="tp-task-id">ID: {taskId}</p>
+      <h4>Task-Fortschritt</h4>
+      <p class="tp-subtitle">{message || 'Warten auf Status-Updates...'}</p>
     </div>
     <div class="tp-header-actions">
       <span class="tp-status {statusClass}">{status || 'WARTET'}</span>
-      <button type="button" class="tp-close" on:click={() => dispatch('dismiss')}>Schließen</button>
+      <button type="button" class="tp-close" onclick={() => dispatch('dismiss')}>Schließen</button>
     </div>
   </div>
 
@@ -219,24 +188,21 @@
 
   <div class="tp-meta-grid">
     <div><span>Schritt</span><strong>{stepLabel}</strong></div>
-    <div><span>Status</span><strong>{status || '-'}</strong></div>
     <div><span>Laufzeit</span><strong>{runtimeLabel}</strong></div>
-    <div><span>Letztes Update</span><strong>{updatedAtLabel || '-'}</strong></div>
   </div>
-
-  <p class="tp-message">{message || 'Warten auf Status-Updates...'}</p>
 
   {#if timelineSteps.length > 0}
     <div class="tp-timeline">
       {#each timelineSteps as step, index}
+        {@const state = stepState(index, step)}
         <div class="tp-timeline-row">
-          <span class="tp-dot {stepState(index, step)}"></span>
+          <span class="tp-dot {state}"></span>
           <div class="tp-timeline-content">
             <strong>{step}</strong>
             <small>
-              {#if stepState(index, step) === 'done'}
+              {#if state === 'done'}
                 erledigt
-              {:else if stepState(index, step) === 'active'}
+              {:else if state === 'active'}
                 läuft
               {:else}
                 ausstehend
@@ -248,51 +214,43 @@
     </div>
   {/if}
 
-  {#if detailRows.length > 0}
-    <div class="tp-details">
-      {#each detailRows as row}
-        <div class="tp-detail-row">
-          <span>{row.key}</span>
-          <code>{row.value}</code>
-        </div>
-      {/each}
-    </div>
-  {/if}
-
   <div class="tp-log">
-    <div class="tp-log-header">
+    <button type="button" class="tp-log-toggle" onclick={() => (logOpen = !logOpen)} aria-expanded={logOpen}>
       <strong>Live Log</strong>
       <span>{logEntries.length} Einträge</span>
-    </div>
-    {#if logEntries.length === 0}
-      <p class="tp-log-empty">Noch keine Log-Meldungen...</p>
-    {:else}
-      <div class="tp-log-list">
-        {#each logEntries as entry}
-          <div class="tp-log-row">
-            <span class="tp-log-time">{entry.time}</span>
-            <span class="tp-log-kind {entry.kind}">
-              {#if entry.kind === 'warn'}
-                WARN
-              {:else if entry.kind === 'info'}
-                INFO
-              {:else if entry.kind === 'substep'}
-                STEP
-              {:else}
-                TASK
-              {/if}
-            </span>
-            <code>{entry.text}</code>
-          </div>
-        {/each}
-      </div>
+      <span class="tp-log-chevron" class:open={logOpen}>›</span>
+    </button>
+    {#if logOpen}
+      {#if logEntries.length === 0}
+        <p class="tp-log-empty">Noch keine Log-Meldungen...</p>
+      {:else}
+        <div class="tp-log-list">
+          {#each logEntries as entry}
+            <div class="tp-log-row">
+              <span class="tp-log-time">{entry.time}</span>
+              <span class="tp-log-kind {entry.kind}">
+                {#if entry.kind === 'warn'}
+                  WARN
+                {:else if entry.kind === 'info'}
+                  INFO
+                {:else if entry.kind === 'substep'}
+                  STEP
+                {:else}
+                  TASK
+                {/if}
+              </span>
+              <code>{entry.text}</code>
+            </div>
+          {/each}
+        </div>
+      {/if}
     {/if}
   </div>
 
   {#if status === 'SUCCESS'}
-    <p class="success">✓ Task completed successfully!</p>
+    <p class="success">✓ Task erfolgreich abgeschlossen</p>
   {:else if status === 'FAILURE'}
-    <p class="error">✗ Task failed: {error || message}</p>
+    <p class="error">✗ Task fehlgeschlagen: {error || message}</p>
   {/if}
 </div>
 
@@ -309,12 +267,14 @@
     justify-content: space-between;
     align-items: start;
     margin-bottom: 0.75rem;
+    gap: 1rem;
   }
 
   .tp-header-actions {
     display: flex;
     align-items: center;
     gap: 0.5rem;
+    flex-shrink: 0;
   }
 
   .tp-header h4 {
@@ -322,11 +282,11 @@
     color: #e2e8f0;
   }
 
-  .tp-task-id {
-    margin: 0.125rem 0 0;
+  .tp-subtitle {
+    margin: 0.25rem 0 0;
     color: #94a3b8;
-    font-size: 0.8rem;
-    word-break: break-all;
+    font-size: 0.82rem;
+    line-height: 1.4;
   }
 
   .tp-status {
@@ -409,11 +369,6 @@
     font-size: 0.88rem;
   }
 
-  .tp-message {
-    margin: 0.3rem 0 0.8rem;
-    color: #cbd5e1;
-  }
-
   .tp-timeline {
     border: 1px solid #1e293b;
     border-radius: 10px;
@@ -453,40 +408,51 @@
     font-size: 0.75rem;
   }
 
-  .tp-details {
-    border-top: 1px solid #1e293b;
-    padding-top: 0.6rem;
-    display: grid;
-    gap: 0.35rem;
-  }
-
   .tp-log {
-    margin-top: 0.8rem;
+    margin-top: 0.5rem;
     border: 1px solid #1e293b;
     border-radius: 10px;
     background: #0a1222;
-    padding: 0.6rem;
+    overflow: hidden;
   }
 
-  .tp-log-header {
+  .tp-log-toggle {
     display: flex;
-    justify-content: space-between;
     align-items: center;
-    margin-bottom: 0.5rem;
+    gap: 0.5rem;
+    width: 100%;
+    padding: 0.6rem;
+    border: none;
+    background: none;
+    color: inherit;
+    cursor: pointer;
+    text-align: left;
   }
 
-  .tp-log-header strong {
+  .tp-log-toggle strong {
     color: #e2e8f0;
     font-size: 0.88rem;
   }
 
-  .tp-log-header span {
+  .tp-log-toggle span:not(.tp-log-chevron) {
     color: #94a3b8;
     font-size: 0.75rem;
   }
 
+  .tp-log-chevron {
+    margin-left: auto;
+    color: #64748b;
+    font-size: 1rem;
+    transition: transform 0.2s ease;
+  }
+
+  .tp-log-chevron.open {
+    transform: rotate(90deg);
+  }
+
   .tp-log-empty {
     margin: 0;
+    padding: 0 0.6rem 0.6rem;
     color: #94a3b8;
     font-size: 0.82rem;
   }
@@ -496,6 +462,8 @@
     gap: 0.35rem;
     max-height: 220px;
     overflow: auto;
+    padding: 0 0.6rem 0.6rem;
+    border-top: 1px solid #1e293b;
   }
 
   .tp-log-row {
@@ -530,27 +498,6 @@
     color: #cbd5e1;
     white-space: normal;
     overflow-wrap: anywhere;
-  }
-
-  .tp-detail-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 0.8rem;
-    font-size: 0.82rem;
-  }
-
-  .tp-detail-row span {
-    color: #94a3b8;
-    flex-shrink: 0;
-  }
-
-  .tp-detail-row code {
-    color: #cbd5e1;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    max-width: 60%;
   }
 
   .success,

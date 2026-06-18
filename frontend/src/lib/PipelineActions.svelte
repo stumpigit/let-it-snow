@@ -9,20 +9,40 @@
     bbox: number[];
   }
 
-  export let project: PipelineProject;
-  export let pipelineProgress: Record<string, number> = {
-    prepare: 0,
-    harmonize: 0,
-    masks: 0,
-    terrain: 0,
-    snow: 0,
-    render: 0,
-    qa: 0,
-    viewer: 0,
-  };
-  export let pipelineRunning = false;
-  export let canRunSnow = false;
-  export let canExportViewer = false;
+  type PipelineProgress = Record<string, number>;
+
+  let {
+    project,
+    pipelineProgress = {
+      prepare: 0,
+      harmonize: 0,
+      masks: 0,
+      terrain: 0,
+      snow: 0,
+      render: 0,
+      qa: 0,
+      viewer: 0,
+    },
+    pipelineRunning = false,
+    canRunFullPipeline = false,
+    canRunSnowPipeline = false,
+    canExportViewer = false,
+    renderProfile = $bindable('default'),
+    resolutionM = $bindable(0.5),
+    maxTextureDim = $bindable(8192),
+    meshStride = $bindable(2),
+  }: {
+    project: PipelineProject;
+    pipelineProgress?: PipelineProgress;
+    pipelineRunning?: boolean;
+    canRunFullPipeline?: boolean;
+    canRunSnowPipeline?: boolean;
+    canExportViewer?: boolean;
+    renderProfile?: string;
+    resolutionM?: number;
+    maxTextureDim?: number;
+    meshStride?: number;
+  } = $props();
 
   const dispatch = createEventDispatcher<{
     prepare: void;
@@ -42,11 +62,6 @@
     { key: 'viewer', name: 'Viewer-Export', icon: 'box' },
   ];
 
-  let renderProfile = 'default';
-  let resolutionM = 0.5;
-  let maxTextureDim = 8192;
-  let meshStride = 2;
-
   function stagePercent(key: string) {
     return Math.max(0, Math.min(100, pipelineProgress[key] ?? 0));
   }
@@ -58,10 +73,9 @@
     return 'idle';
   }
 
-  function totalProgress() {
-    const values = stages.map((stage) => stagePercent(stage.key));
-    return values.reduce((sum, value) => sum + value, 0) / values.length;
-  }
+  const totalProgress = $derived(
+    stages.reduce((sum, stage) => sum + stagePercent(stage.key), 0) / stages.length
+  );
 
   const actions = [
     {
@@ -79,8 +93,8 @@
       description: 'Alle Rechenschritte von der Basis bis zum Winter-Rendering ausführen.',
       icon: 'play-circle',
       tone: 'violet',
-      enabled: () => canRunSnow && !pipelineRunning,
-      hint: 'Empfohlen für neue oder vollständig neu zu berechnende Projekte.',
+      enabled: () => canRunFullPipeline && !pipelineRunning,
+      hint: 'Verfügbar nach abgeschlossener Regionsvorbereitung.',
     },
     {
       id: 'snow-pipeline',
@@ -88,8 +102,8 @@
       description: 'Nur ab der Schnee-Simulation weiterrechnen, wenn die Basis schon vorbereitet ist.',
       icon: 'snowflake',
       tone: 'cyan',
-      enabled: () => canRunSnow && !pipelineRunning,
-      hint: 'Ideal für Iterationen auf vorhandener Datenbasis.',
+      enabled: () => canRunSnowPipeline && !pipelineRunning,
+      hint: 'Erfordert abgeschlossene Harmonisierung, Maskierung und Terrain-Berechnung.',
     },
     {
       id: 'export-viewer',
@@ -98,7 +112,7 @@
       icon: 'box',
       tone: 'lavender',
       enabled: () => canExportViewer && !pipelineRunning,
-      hint: 'Danach kann das Resultat direkt im 3D-Viewer geöffnet werden.',
+      hint: 'Erfordert abgeschlossene Pipeline inklusive Qualitätskontrolle.',
     },
   ];
 
@@ -112,32 +126,35 @@
     <div>
       <div class="eyebrow">Projekt-Workflow</div>
       <h3>{project.name}</h3>
-      <p class="hero-copy">Wählen Sie den nächsten sinnvollen Schritt: zuerst vorbereiten, danach komplette Pipeline oder gezielt ab Schnee-Simulation weiterrechnen, und zum Schluss in den 3D-Viewer exportieren.</p>
+      <p class="hero-copy">Wähl den nächsten Schritt: zuerst vorbereiten, danach komplette Pipeline oder gezielt ab Schnee-Simulation weiterrechnen, und zum Schluss in den 3D-Viewer exportieren.</p>
     </div>
     <div class="hero-meta">
       <div class="meta-pill">
         <Icon name="box" size={14} />
         <span>{project.bbox.join(', ')}</span>
       </div>
-      <div class="meta-pill accent">
-        <Icon name="refresh" size={14} className={pipelineRunning ? 'spin' : ''} />
-        <span>{Math.round(totalProgress())}% Gesamtfortschritt</span>
-      </div>
+
     </div>
   </section>
 
   <section class="pipeline-section">
     <div class="section-title-row">
       <h3>Pipeline-Schritte</h3>
-      <span class="section-note">Live-Status pro Stufe</span>
+        <span class="section-note">
+          <Icon name="refresh" size={14} className={pipelineRunning ? 'spin' : ''} />
+          <span>{Math.round(totalProgress)}% Gesamtfortschritt</span>
+        </span>
     </div>
-    <div class="pipeline-grid">
-      {#each stages as stage, index}
-        <div class="stage-card {stageState(stage.key)}">
-          <div class="stage-number">{index + 1}</div>
-          <div class="stage-copy">
-            <div class="stage-name">{stage.name}</div>
-            <div class="stage-progress">{Math.round(stagePercent(stage.key))}%</div>
+    <div class="pipeline-track" role="list" aria-label="Pipeline-Fortschritt">
+      {#each stages as stage}
+        {@const pct = Math.round(stagePercent(stage.key))}
+        <div class="stage-item {stageState(stage.key)}" role="listitem">
+          <div class="stage-row">
+            <span class="stage-label">{stage.name}</span>
+            <span class="stage-pct">{pct}%</span>
+          </div>
+          <div class="stage-bar" aria-hidden="true">
+            <div class="stage-bar-fill" style="width: {pct}%"></div>
           </div>
         </div>
       {/each}
@@ -303,58 +320,97 @@
     font-size: 0.78rem;
   }
 
-  .pipeline-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-    gap: 0.75rem;
+  .pipeline-section {
+    padding: 0.75rem 1rem;
+    background: rgba(15, 23, 42, 0.45);
+    border: 1px solid rgba(30, 41, 59, 0.8);
+    border-radius: 0.75rem;
   }
 
-  .stage-card {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    padding: 0.85rem 1rem;
-    background: #0f172a;
-    border: 1px solid #1e293b;
-    border-radius: 0.85rem;
+  .pipeline-section .section-title-row {
+    margin-bottom: 0.6rem;
   }
 
-  .stage-card.active {
-    border-color: rgba(59, 130, 246, 0.7);
-    box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.12);
-  }
-
-  .stage-card.done {
-    border-color: rgba(16, 185, 129, 0.45);
-    background: rgba(16, 185, 129, 0.08);
-  }
-
-  .stage-number {
-    width: 28px;
-    height: 28px;
-    border-radius: 999px;
-    display: grid;
-    place-items: center;
-    font-size: 0.76rem;
-    font-weight: 700;
-    color: #e2e8f0;
-    background: #1e293b;
-  }
-
-  .stage-copy {
-    min-width: 0;
-  }
-
-  .stage-name {
-    color: #e2e8f0;
-    font-size: 0.84rem;
+  .pipeline-section .section-title-row h3 {
+    font-size: 0.88rem;
     font-weight: 600;
+    color: #94a3b8;
   }
 
-  .stage-progress {
+  .pipeline-track {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 0.5rem 1rem;
+  }
+
+  .stage-item {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    min-width: 0;
+    padding: 0;
+    background: none;
+    border: none;
+    pointer-events: none;
+  }
+
+  .stage-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.5rem;
+  }
+
+  .stage-label {
+    color: #64748b;
+    font-size: 0.72rem;
+    font-weight: 500;
+    line-height: 1.3;
+  }
+
+  .stage-pct {
+    color: #475569;
+    font-size: 0.68rem;
+    font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
+  }
+
+  .stage-bar {
+    height: 3px;
+    background: rgba(30, 41, 59, 0.9);
+    border-radius: 999px;
+    overflow: hidden;
+  }
+
+  .stage-bar-fill {
+    height: 100%;
+    background: #334155;
+    border-radius: 999px;
+    transition: width 0.35s ease;
+  }
+
+  .stage-item.active .stage-label {
     color: #94a3b8;
-    font-size: 0.76rem;
-    margin-top: 0.2rem;
+  }
+
+  .stage-item.active .stage-pct {
+    color: #7dd3fc;
+  }
+
+  .stage-item.active .stage-bar-fill {
+    background: #3b82f6;
+  }
+
+  .stage-item.done .stage-label {
+    color: #6ee7b7;
+  }
+
+  .stage-item.done .stage-pct {
+    color: #34d399;
+  }
+
+  .stage-item.done .stage-bar-fill {
+    background: #10b981;
   }
 
   .action-grid {
