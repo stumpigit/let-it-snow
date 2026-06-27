@@ -60,6 +60,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 # Celery worker (requires wintermaker-upstream)
 celery -A app.worker.celery_app worker --loglevel=info
+(bzw. mit Python3.12: python3.12 -m celery -A app.worker.celery_app worker --loglevel=info)
 
 # Frontend
 cd frontend && npm install && npm run dev
